@@ -151,11 +151,12 @@ providers:
       - id: anthropic.claude-3-5-sonnet-20241022-v2:0
 ```
 
-### MiniMax and GLM custom provider examples
+### codex-lb, MiniMax, and GLM custom provider examples
 
-For common MiniMax and GLM/zAI setup, prefer the provider presets so the OpenAI-compatible API, base URL, env var, model id, and compatibility flags are written together:
+For common codex-lb, MiniMax, and GLM/zAI setup, prefer the provider presets so the OpenAI-compatible API, base URL, env var, model id, and compatibility flags are written together:
 
 ```sh
+gjc setup provider --preset codex-lb
 gjc setup provider --preset minimax
 gjc setup provider --preset minimax-cn
 gjc setup provider --preset glm
@@ -164,12 +165,13 @@ gjc setup provider --preset glm
 The same presets are available inside the TUI:
 
 ```text
+/provider add --preset codex-lb
 /provider add --preset minimax
 /provider add --preset glm
 /provider add zai
 ```
 
-Presets only write `models.yml` entries that reference documented environment variable names (`MINIMAX_CODE_API_KEY`, `MINIMAX_CODE_CN_API_KEY`, or `ZAI_API_KEY`); they do not store or validate real credentials. The GLM preset aliases (`glm`, `zai`, `z-ai`) write an OpenAI-compatible custom provider named `glm-proxy` and do not replace the first-class `zai` provider.
+Presets only write `models.yml` entries that reference documented environment variable names (`CODEX_LB_API_KEY`, `MINIMAX_CODE_API_KEY`, `MINIMAX_CODE_CN_API_KEY`, or `ZAI_API_KEY`); they do not store or validate real credentials. The `codex-lb` preset writes an OpenAI Responses provider named `codex-lb`. The GLM preset aliases (`glm`, `zai`, `z-ai`) write an OpenAI-compatible custom provider named `glm-proxy` and do not replace the first-class `zai` provider.
 
 ## Model profiles (`--mpreset`)
 
@@ -276,6 +278,39 @@ providers:
 Use provider-level `headers` for proxy-required headers. Keep the provider `api` set to `openai-completions` when the proxy exposes Chat Completions-compatible `/v1/chat/completions` semantics. `auth: apiKey` sends the resolved token as bearer auth; use `auth: none` only for trusted local/no-auth endpoints.
 
 `requestTransform` and `wireModelId` remain supported for request-body shaping, but they are not needed for ordinary OpenAI-compatible proxies whose local model id is already the upstream wire id. Unknown config keys fail validation before a provider request is sent.
+
+### codex-lb Docker proxy example
+
+When running `~/Desktop/codex-lb` with Docker, use the built-in provider preset to write a local OpenAI Responses proxy config:
+
+```bash
+cd ~/Desktop/codex-lb
+docker compose up -d --build
+export CODEX_LB_API_KEY="sk-clb-..."
+gjc setup provider --preset codex-lb
+```
+
+The preset writes this provider shape to `~/.gjc/agent/models.yml`:
+
+```yaml
+providers:
+  codex-lb:
+    baseUrl: http://127.0.0.1:2455/v1
+    apiKeyEnv: CODEX_LB_API_KEY
+    api: openai-responses
+    auth: apiKey
+    models:
+      - id: gpt-5.4
+```
+
+Verify the proxy and key before selecting the model. The available list can vary by the codex-lb API key allowlist and upstream account, so prefer the live `/v1/models` response if you need to change the configured model id:
+
+```bash
+curl -H "Authorization: Bearer $CODEX_LB_API_KEY" http://127.0.0.1:2455/v1/models
+gjc --model codex-lb/gpt-5.4
+```
+
+Use `gjc setup provider --preset codex-lb --force` if you need to overwrite an existing `codex-lb` provider entry with the preset defaults.
 
 When request shaping is needed:
 

@@ -88,7 +88,7 @@ describe("provider slash command", () => {
 		expect(configChanged).toBe(true);
 	});
 
-	it("adds MiniMax and GLM provider presets through slash onboarding", async () => {
+	it("adds codex-lb, MiniMax, and GLM provider presets through slash onboarding", async () => {
 		tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-provider-slash-"));
 		setAgentDir(tempAgentDir);
 		const outputs: string[] = [];
@@ -105,6 +105,7 @@ describe("provider slash command", () => {
 			notifyConfigChanged: () => undefined,
 		} as unknown as SlashCommandRuntime;
 
+		await command?.handle?.({ name: "provider", args: "add --preset codex-lb", text: "/provider add" }, runtime);
 		await command?.handle?.({ name: "provider", args: "add --preset minimax", text: "/provider add" }, runtime);
 		await command?.handle?.({ name: "provider", args: "add zai", text: "/provider add" }, runtime);
 
@@ -115,11 +116,17 @@ describe("provider slash command", () => {
 					api: string;
 					baseUrl: string;
 					apiKeyEnv?: string;
+					auth?: string;
 					compat?: { thinkingFormat?: string };
 					models: Array<{ id: string }>;
 				}
 			>;
 		};
+		expect(parsed.providers["codex-lb"]?.api).toBe("openai-responses");
+		expect(parsed.providers["codex-lb"]?.baseUrl).toBe("http://127.0.0.1:2455/v1");
+		expect(parsed.providers["codex-lb"]?.apiKeyEnv).toBe("CODEX_LB_API_KEY");
+		expect(parsed.providers["codex-lb"]?.auth).toBe("apiKey");
+		expect(parsed.providers["codex-lb"]?.models.map(model => model.id)).toEqual(["gpt-5.4"]);
 		expect(parsed.providers["minimax-code"]?.api).toBe("openai-completions");
 		expect(parsed.providers["minimax-code"]?.baseUrl).toBe("https://api.minimax.io/v1");
 		expect(parsed.providers["minimax-code"]?.apiKeyEnv).toBe("MINIMAX_CODE_API_KEY");
@@ -129,6 +136,7 @@ describe("provider slash command", () => {
 		expect(parsed.providers["glm-proxy"]?.apiKeyEnv).toBe("ZAI_API_KEY");
 		expect(parsed.providers["glm-proxy"]?.compat?.thinkingFormat).toBe("zai");
 		expect(parsed.providers["glm-proxy"]?.models.map(model => model.id)).toEqual(["glm-4.6"]);
+		expect(outputs.join("\n")).toContain("codex-lb");
 		expect(outputs.join("\n")).toContain("MiniMax Coding Plan");
 		expect(outputs.join("\n")).toContain("GLM / zAI");
 	});

@@ -144,6 +144,39 @@ describe("provider onboarding setup core", () => {
 		expect(parsed.providers["minimax-code"]?.models.map(model => model.id)).toEqual(["minimax-m3"]);
 	});
 
+	it("adds codex-lb through the provider preset with local OpenAI Responses config", async () => {
+		const modelsPath = await tempModelsPath();
+		const result = await addApiCompatibleProvider({
+			preset: "codex-lb",
+			modelsPath,
+		});
+
+		expect(result.providerId).toBe("codex-lb");
+		expect(result.api).toBe("openai-responses");
+		expect(result.preset).toBe("codex-lb");
+		expect(result.modelIds).toEqual(["gpt-5.4"]);
+		expect(result.credentialSource).toBe("env");
+		expect(formatProviderSetupResult(result)).toContain("codex-lb");
+
+		const parsed = YAML.parse(await Bun.file(modelsPath).text()) as {
+			providers: Record<
+				string,
+				{
+					api: string;
+					baseUrl: string;
+					apiKeyEnv?: string;
+					auth?: string;
+					models: Array<{ id: string }>;
+				}
+			>;
+		};
+		expect(parsed.providers["codex-lb"]?.api).toBe("openai-responses");
+		expect(parsed.providers["codex-lb"]?.baseUrl).toBe("http://127.0.0.1:2455/v1");
+		expect(parsed.providers["codex-lb"]?.apiKeyEnv).toBe("CODEX_LB_API_KEY");
+		expect(parsed.providers["codex-lb"]?.auth).toBe("apiKey");
+		expect(parsed.providers["codex-lb"]?.models.map(model => model.id)).toEqual(["gpt-5.4"]);
+	});
+
 	it("adds GLM/zAI through preset aliases with OpenAI-compatible config", async () => {
 		const modelsPath = await tempModelsPath();
 		const result = await addApiCompatibleProvider({
@@ -322,6 +355,8 @@ describe("provider onboarding setup core", () => {
 		expect(parseProviderCompatibility("claude")).toBe("anthropic");
 		expect(findProviderPreset("minimax-code")?.id).toBe("minimax");
 		expect(findProviderPreset("zai")?.id).toBe("glm");
+		expect(findProviderPreset("clb")?.id).toBe("codex-lb");
+		expect(formatProviderPresetList()).toContain("codex-lb");
 		expect(formatProviderPresetList()).toContain("minimax");
 		expect(formatProviderPresetList()).toContain("glm");
 		expect(parseModelList(["a,b", "a", " c "])).toEqual(["a", "b", "c"]);

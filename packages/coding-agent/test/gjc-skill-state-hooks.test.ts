@@ -219,6 +219,63 @@ describe("GJC native skill-state hooks", () => {
 		expect(detectSkillKeywords("please run a consensus plan")[0]?.skill).toBe("ralplan");
 	});
 
+	it("UserPromptSubmit injects GJC handoff routing context for delegation prompts", async () => {
+		const root = await cwd();
+		const result = await dispatchGjcNativeSkillHook({
+			hookEventName: "UserPromptSubmit",
+			userPrompt: "이 작업이 GJC가 필요한 일이라면 GJC에게 넘길 handoff를 작성해줘",
+			cwd: root,
+			sessionId: "session-gjc-handoff",
+		});
+
+		expect(result.hookEventName).toBe("UserPromptSubmit");
+		expect(result.outputJson?.hookSpecificOutput).toMatchObject({ hookEventName: "UserPromptSubmit" });
+		const context = String(
+			(result.outputJson?.hookSpecificOutput as { additionalContext?: unknown } | undefined)?.additionalContext ??
+				"",
+		);
+		expect(context).toContain("GJC handoff routing");
+		expect(context).toContain(`GJC handoff workspace: ${root}.`);
+		expect(context).toContain("workspace, user goal, constraints, current state or evidence");
+		expect(context).not.toContain("codex-lb/gpt-5.5:xhigh");
+	});
+
+	it("UserPromptSubmit skips GJC handoff routing context for ordinary prompts", async () => {
+		const root = await cwd();
+		const result = await dispatchGjcNativeSkillHook({
+			hookEventName: "UserPromptSubmit",
+			userPrompt: "이 함수가 하는 일을 설명해줘",
+			cwd: root,
+			sessionId: "session-no-gjc-handoff",
+		});
+
+		expect(result.hookEventName).toBe("UserPromptSubmit");
+		expect(result.outputJson).toBeNull();
+	});
+
+	it("UserPromptSubmit combines workflow activation and GJC handoff routing context", async () => {
+		const root = await cwd();
+		const result = await dispatchGjcNativeSkillHook(
+			{
+				hookEventName: "UserPromptSubmit",
+				userPrompt: "$team 병렬로 나눌 작업이면 GJC에게 줄 handoff를 작성해줘",
+				cwd: root,
+				sessionId: "session-team-gjc-handoff",
+				threadId: "thread-team-gjc-handoff",
+			},
+			{ effectiveSkillConfig: testEffectiveSkillConfig },
+		);
+
+		const context = String(
+			(result.outputJson?.hookSpecificOutput as { additionalContext?: unknown } | undefined)?.additionalContext ??
+				"",
+		);
+		expect(context).toContain('GJC native UserPromptSubmit detected workflow keyword "$team" -> team');
+		expect(context).toContain("GJC handoff routing");
+		const state = await readVisibleSkillActiveState(root, "session-team-gjc-handoff");
+		expect(state).toMatchObject({ active: true, skill: "team" });
+	});
+
 	it("UserPromptSubmit persists session-scoped skill-active and mode state", async () => {
 		const root = await cwd();
 		const result = await dispatchGjcNativeSkillHook(

@@ -51,6 +51,7 @@ function createSessionOptions(agentDir: string, options?: { modelPattern?: strin
 }
 
 function expectProviderOnboardingGuidance(text: string): void {
+	expect(text).toContain("codex-lb");
 	expect(text).toContain("/provider add --compat <openai|anthropic>");
 	expect(text).toContain("gjc setup provider");
 	expect(text).toContain("/provider login [provider-id]");

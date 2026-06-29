@@ -125,8 +125,8 @@ function parseProviderSetupSlashArgs(args: string): {
 function providerSetupUsage(): string {
 	return [
 		"Provider onboarding",
-		"Presets: /provider add --preset <minimax|minimax-cn|glm> [--force]",
-		"Aliases: /provider add minimax, /provider add minimax-cn, /provider add glm, /provider add zai (writes glm-proxy)",
+		"Presets: /provider add --preset <codex-lb|minimax|minimax-cn|glm> [--force]",
+		"Aliases: /provider add clb (writes codex-lb), /provider add minimax, /provider add minimax-cn, /provider add glm, /provider add zai (writes glm-proxy)",
 		"API providers: /provider add --compat <openai|anthropic> --provider <id> --base-url <url> --api-key-env <ENV> --model <model> [--force]",
 		`Available presets:\n${formatProviderPresetList()}`,
 		"OAuth/subscription providers: /provider login [provider-id] or /login [provider-id]",

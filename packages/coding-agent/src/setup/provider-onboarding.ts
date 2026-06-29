@@ -70,6 +70,18 @@ const GLM_OPENAI_COMPAT: ProviderCompatConfig = {
 
 export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
 	{
+		id: "codex-lb",
+		aliases: ["codexlb", "clb"],
+		name: "codex-lb",
+		description: "Local codex-lb OpenAI-compatible Docker proxy",
+		compatibility: "openai",
+		api: "openai-responses",
+		providerId: "codex-lb",
+		baseUrl: "http://127.0.0.1:2455/v1",
+		apiKeyEnv: "CODEX_LB_API_KEY",
+		models: ["gpt-5.4"],
+	},
+	{
 		id: "minimax",
 		aliases: ["minimax-code"],
 		name: "MiniMax Coding Plan",

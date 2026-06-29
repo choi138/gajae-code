@@ -1305,13 +1305,17 @@ describe("ModelRegistry", () => {
 
 		test("provider presets load through the model registry with expected OpenAI-compatible settings", async () => {
 			const presetModelsPath = path.join(tempDir, "preset-models.yml");
+			await addApiCompatibleProvider({ preset: "codex-lb", modelsPath: presetModelsPath });
 			await addApiCompatibleProvider({ preset: "minimax", modelsPath: presetModelsPath });
 			await addApiCompatibleProvider({ preset: "zai", modelsPath: presetModelsPath });
 
 			const registry = new ModelRegistry(authStorage, presetModelsPath);
+			const codexLb = registry.find("codex-lb", "gpt-5.4");
 			const minimax = registry.find("minimax-code", "minimax-m3");
 			const glm = registry.find("glm-proxy", "glm-4.6");
 
+			expect(codexLb?.api).toBe("openai-responses");
+			expect(codexLb?.baseUrl).toBe("http://127.0.0.1:2455/v1");
 			expect(minimax?.api).toBe("openai-completions");
 			// #614: preset-onboarded models inherit the bundled canonical display
 			// name (MiniMax-M3) while preserving the lowercase machine id.

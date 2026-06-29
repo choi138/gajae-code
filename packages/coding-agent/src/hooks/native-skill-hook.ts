@@ -5,6 +5,7 @@ import { YAML } from "bun";
 import type { SkillDiscoverySettings } from "../config/skill-settings-defaults";
 import { DEFAULT_DISABLED_EXTENSIONS, DEFAULT_SKILL_DISCOVERY_SETTINGS } from "../config/skill-settings-defaults";
 import { sessionLogsDir } from "../gjc-runtime/session-layout";
+import gjcHandoffRoutingPrompt from "../prompts/system/gjc-handoff-routing.md" with { type: "text" };
 import {
 	buildActiveUltragoalPromptContext,
 	buildSkillActivationAdditionalContext,
@@ -29,6 +30,45 @@ interface GjcNativeHookDispatchOptions {
 	stateDir?: string;
 	effectiveSkillConfig?: EffectiveSkillConfigInput;
 	configPaths?: string[];
+}
+
+const CONTEXT_FIELD_LIMIT = 300;
+
+const GJC_TARGET_PATTERN = /\b(?:gjc|gajae-code)\b|가재\s*-?\s*코드/i;
+const GJC_HANDOFF_INTENT_PATTERNS = [
+	/\bhand\s*-?\s*off\b|\bhandoff+\b/i,
+	/핸드\s*오프|핸드오프|인계|이어\s*받|이어받|넘겨|넘기|전달/,
+	/위임|맡겨|맡기|대신\s*시켜|돌려|실행/,
+	/\bdelegat(?:e|ion|ing)?\b|\bpass\s+(?:it|this|that|the\s+work)\s+to\b|\brun\s+(?:it|this|that)\s+(?:with|in|on|through)\b/i,
+	/병렬|서브\s*에이전트|작업\s*나눠|\bparallel\b|\bsubagent\b|\bworker\b|\bteam\b/i,
+	/(?:리뷰|검토).{0,30}(?:맡겨|맡기|위임|돌려|시켜)/,
+	/\b(?:review|audit)\b.{0,30}\b(?:with|in|using|via)\s+(?:gjc|gajae-code)\b/i,
+	/(?:필요|적합|맞는).{0,30}(?:일|작업|경우|때|지)\s*(?:라면|이면|면|인지)?/,
+];
+
+function hasPattern(patterns: readonly RegExp[], value: string): boolean {
+	return patterns.some(pattern => pattern.test(value));
+}
+
+function sanitizeContextField(value: string): string {
+	const compact = value
+		.replace(/[\r\n\t]+/g, " ")
+		.replace(/`+/g, "'")
+		.trim();
+	if (compact.length <= CONTEXT_FIELD_LIMIT) return compact;
+	return `${compact.slice(0, CONTEXT_FIELD_LIMIT - 3)}...`;
+}
+
+export function shouldInjectGjcHandoffRoutingContext(prompt: string): boolean {
+	const text = prompt.trim();
+	if (!text || !GJC_TARGET_PATTERN.test(text)) return false;
+	return hasPattern(GJC_HANDOFF_INTENT_PATTERNS, text);
+}
+
+function buildGjcHandoffRoutingContext(prompt: string, cwd: string): string | null {
+	if (!shouldInjectGjcHandoffRoutingContext(prompt)) return null;
+	const workspace = sanitizeContextField(cwd);
+	return `${gjcHandoffRoutingPrompt.trim()} GJC handoff workspace: ${workspace || "unknown"}.`;
 }
 
 function readNestedRecord(value: Record<string, unknown>, key: string): Record<string, unknown> {
@@ -218,9 +258,11 @@ export async function dispatchGjcNativeSkillHook(
 				},
 			};
 		}
+		const gjcHandoffContext = buildGjcHandoffRoutingContext(prompt, cwd);
 		const additionalContext = [
 			skillState ? buildSkillActivationAdditionalContext(skillState, effectiveSkillConfig) : activeUltragoalContext,
 			recoveryContext,
+			gjcHandoffContext,
 		]
 			.filter((value): value is string => Boolean(value))
 			.join(" ");

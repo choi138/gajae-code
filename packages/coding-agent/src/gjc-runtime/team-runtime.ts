@@ -1931,7 +1931,22 @@ export function buildWorkerCommand(
 	const workspace = worker.worktree_path
 		? `Worker worktree: ${worker.worktree_path}.`
 		: `Worker cwd: ${config.leader.cwd}.`;
-	const prompt = [
+	// The worker prompt body is dispatched into the pane through
+	// `tmux send-keys`, which treats embedded LF characters as Enter
+	// keypresses. A multi-line prompt therefore lands in the pane as
+	// multiple prompt bodies followed by premature Enter presses, which on
+	// Windows + psmux/ConPTY causes the worker CLI to bail out before the
+	// startup ACK fires. Normalize the body to a single line by replacing
+	// any LF/CRLF with a space, and strip a defensive U+FEFF in case a
+	// caller managed to inject a UTF-8 BOM into the task text. Empty /
+	// whitespace-only bodies fall back to a one-line placeholder so the
+	// worker never sits idle at an empty prompt.
+	const normalizePrompt = (raw: string): string =>
+		raw
+			.replace(/[\uFEFF\u200B]/g, "")
+			.replace(/\r?\n+/g, " ")
+			.trim();
+	const rawPrompt = [
 		`You are ${worker.id} in gjc team ${config.team_name}.`,
 		`Team state root: ${config.state_root}.`,
 		workspace,
@@ -1940,6 +1955,7 @@ export function buildWorkerCommand(
 		`Before claiming work, send startup ACK: gjc team api worker-startup-ack --input '{"team_name":"${config.team_name}","worker_id":"${worker.id}","protocol_version":"1"}' --json.`,
 		`Use gjc team api update-worker-status to report task-local activity, then claim-task/transition-task-status with this worker id; keep heartbeat current during long work, record completion_evidence (summary plus a passed command or verified inspection/artifact item) before completed, and do not mutate leader-owned goal state.`,
 	].join("\n");
+	const prompt = normalizePrompt(rawPrompt) || `Worker ${worker.id} ready.`;
 	const envLines = [
 		envAssignment("GJC_TEAM_WORKER", `${config.team_name}/${worker.id}`),
 		envAssignment("GJC_TEAM_INTERNAL_WORKER", `${config.team_name}/${worker.id}`),
@@ -1951,8 +1967,33 @@ export function buildWorkerCommand(
 		...(worker.worktree_path ? [envAssignment("GJC_TEAM_WORKTREE_PATH", worker.worktree_path)] : []),
 	];
 	const joined = platform === "win32" ? envLines.join(" ") : envLines.join(" ");
-	const invocation = platform === "win32" ? `& ${config.worker_command}` : config.worker_command;
-	return `${joined} ${invocation} ${quote(prompt)}`;
+	// On Windows we wrap the worker command invocation in `& { & 'cmd' 'arg1' ... }`
+	// so pwsh keeps the whole multi-statement body in command position. Two
+	// failure modes this avoids:
+	//   1. Bare `bun 'cli.ts' 'prompt'` after `$env:X = 'y'; ...` would be
+	//      parsed in expression position and PowerShell would reject the
+	//      second quoted token with "Unexpected token '<cli.ts>'".
+	//   2. `& { 'cmd' 'arg1' 'arg2' }` (single & inside a block with adjacent
+	//      single-quoted tokens) is itself invalid because pwsh does not
+	//      concatenate adjacent single-quoted strings inside a script block.
+	// The nested `&` inside the block forces command-position parsing for
+	// the invocation. POSIX shells do not need this — they already treat
+	// `cmd 'arg'` as a normal command invocation after `;`-separated
+	// variable assignments.
+	//
+	// ASSUMPTION: this branch only fires when the worker pane is a PowerShell
+	// shell. psmux launches pwsh by default on Windows, so the unset /
+	// unset-and-replace cases are correct. If a user has explicitly set
+	// `set -g default-shell "C:/Program Files/Git/bin/bash.exe"` (or any
+	// other non-pwsh shell), this branch will send PowerShell syntax to a
+	// bash pane and the worker will fail with a parse error. Detecting the
+	// pane's shell at runtime and switching the quoting + invocation style
+	// accordingly is a follow-up; for now the pwsh default is assumed.
+	if (platform === "win32") {
+		const invocation = `& ${config.worker_command} ${quote(prompt)}`;
+		return `& { ${joined} ${invocation} }`;
+	}
+	return `${joined} ${config.worker_command} ${quote(prompt)}`;
 }
 interface GjcTeamInitialLane {
 	label: string;
@@ -2070,7 +2111,6 @@ async function startTmuxSession(
 					"#{pane_id}",
 					"-c",
 					worker.worktree_path ?? config.leader.cwd,
-					buildWorkerCommand(config, worker),
 				],
 				{ stdout: "pipe", stderr: "pipe" },
 			);
@@ -2081,6 +2121,31 @@ async function startTmuxSession(
 			rollbackPaneIds.push(paneId);
 			if (worker.index === 1) rightStackRootPaneId = paneId;
 			workers.push({ ...worker, pane_id: paneId });
+			// On psmux/ConPTY (Windows pwsh default-shell) panes, tmux writes the
+			// split-window command argv to the new pane's stdin but pwsh's
+			// readline never receives an Enter, so the worker never starts.
+			// Create the pane without a command, then dispatch the worker
+			// command through send-keys + Enter so it actually executes.
+			// Two-step dispatch because tmux's `-l` (literal mode) flag is
+			// global per send-keys invocation, not per arg: passing `-l
+			// <body> Enter` would treat "Enter" as literal text too. Sending
+			// the body in literal mode first and the Enter keypress second
+			// keeps the body verbatim while still submitting the prompt as a
+			// keystroke.
+			const body = buildWorkerCommand(config, worker);
+			Bun.spawnSync([config.tmux_command, "send-keys", "-l", "-t", paneId, body], {
+				stdout: "ignore",
+				stderr: "ignore",
+			});
+			const sendKeys = Bun.spawnSync([config.tmux_command, "send-keys", "-t", paneId, "Enter"], {
+				stdout: "ignore",
+				stderr: "ignore",
+			});
+			// void-cast the exit code so the linter does not flag an unused
+			// expression; the value is intentionally discarded here because
+			// the actual spawn outcome is recovered by the leader through
+			// the worker startup-ack watcher, not via the spawn exit code.
+			void sendKeys.exitCode;
 		}
 		Bun.spawnSync([config.tmux_command, "select-layout", "-t", config.tmux_target, "main-vertical"], {
 			stdout: "ignore",

@@ -4,8 +4,14 @@ import type { OAuthProvider } from "@gajae-code/ai/utils/oauth/types";
 import type { Component, OverlayHandle } from "@gajae-code/tui";
 import { Input, Loader, Spacer, Text } from "@gajae-code/tui";
 import { getAgentDbPath, getProjectDir } from "@gajae-code/utils";
-import { activateModelProfile, materializeActiveModelProfileAssignment } from "../../config/model-profile-activation";
-import { recommendModelProfileForProvider } from "../../config/model-profiles";
+import {
+	activateModelProfile,
+	type MaterializeModelProfileForDeletionResult,
+	materializeActiveModelProfileAssignment,
+	materializeModelProfileForDeletion,
+	restoreMaterializedModelProfileForDeletion,
+} from "../../config/model-profile-activation";
+import { formatModelProfileDisplayLabel, recommendModelProfileForProvider } from "../../config/model-profiles";
 import { GJC_MODEL_ASSIGNMENT_TARGETS } from "../../config/model-registry";
 import { formatModelSelectorValue } from "../../config/model-resolver";
 import type { ModelProfileConfig } from "../../config/models-config-schema";
@@ -39,7 +45,11 @@ import {
 	CREDENTIAL_AUTO_IMPORT_ROTATION_WARNING,
 	runExternalCredentialAutoImport,
 } from "../../setup/credential-auto-import";
-import { filterAutoImportOAuthCredentials, formatDiscoverySummary } from "../../setup/credential-import";
+import {
+	filterAutoImportOAuthCredentials,
+	formatDiscoverySummary,
+	type ImportableCredential,
+} from "../../setup/credential-import";
 import {
 	MODEL_ONBOARDING_API_PROVIDER_COMMAND,
 	MODEL_ONBOARDING_PROVIDER_PRESET_COMMAND,
@@ -248,7 +258,7 @@ export class SelectorController {
 					const profile = await this.ctx.session.modelRegistry.saveCustomModelProfile(input.name, input.profile);
 					await this.ctx.session.modelRegistry.refresh("offline");
 					await this.ctx.notifyConfigChanged?.();
-					this.ctx.showStatus(`Custom model preset created: ${profile.displayName ?? profile.name}`);
+					this.ctx.showStatus(`Custom model preset created: ${formatModelProfileDisplayLabel(profile)}`);
 					done();
 					this.ctx.ui.requestRender();
 				} catch (err) {
@@ -269,6 +279,106 @@ export class SelectorController {
 			);
 			return { component: wizard, focus: wizard };
 		});
+	}
+
+	async #renameCustomModelPreset(profileName: string, modelSelector: ModelSelectorComponent): Promise<void> {
+		const profile = this.ctx.session.modelRegistry.getModelProfile(profileName);
+		const currentName = profile ? formatModelProfileDisplayLabel(profile) : profileName;
+		const input = await this.ctx.showHookInput(`Rename custom model preset: ${currentName}`, undefined, undefined, {
+			initialValue: currentName,
+		});
+		if (input === undefined) {
+			this.ctx.showStatus("Preset rename cancelled.");
+			this.ctx.ui.requestRender();
+			return;
+		}
+		try {
+			const renamed = await this.ctx.session.modelRegistry.renameCustomModelProfile(profileName, input);
+			await this.ctx.session.modelRegistry.refresh("offline");
+			await this.ctx.notifyConfigChanged?.();
+			modelSelector.refreshPresetProfiles(renamed.name);
+			this.ctx.showStatus(`Custom model preset renamed: ${formatModelProfileDisplayLabel(renamed)}`);
+			this.ctx.ui.requestRender();
+		} catch (err) {
+			this.ctx.showError(`Preset rename failed: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+
+	async #deleteCustomModelPreset(profileName: string, modelSelector: ModelSelectorComponent): Promise<void> {
+		const profile = this.ctx.session.modelRegistry.getModelProfile(profileName);
+		const profileLabel = profile ? formatModelProfileDisplayLabel(profile) : profileName;
+		const confirmed = await this.ctx.showHookConfirm(
+			`Delete custom model preset: ${profileLabel}`,
+			"This removes the preset entry after preserving current role model settings when this preset is active/default.",
+		);
+		if (!confirmed) {
+			this.ctx.showStatus("Preset delete cancelled.");
+			this.ctx.ui.requestRender();
+			return;
+		}
+
+		const activeProfile = this.ctx.session.getActiveModelProfile?.();
+		const defaultProfile = this.ctx.settings.get("modelProfile.default");
+		let snapshot: MaterializeModelProfileForDeletionResult | undefined;
+		let deletedProfile: ModelProfileConfig | undefined;
+		const refreshSelectorState = (refreshedProfileName?: string): void => {
+			modelSelector.refreshRoleAssignments({
+				currentModel: this.ctx.session.model,
+				currentThinkingLevel: this.ctx.session.thinkingLevel,
+				activeModelProfile:
+					this.ctx.session.getActiveModelProfile?.() ?? this.ctx.settings.get("modelProfile.default"),
+			});
+			modelSelector.refreshPresetProfiles(refreshedProfileName);
+		};
+		try {
+			if (activeProfile === profileName || defaultProfile === profileName) {
+				snapshot = await materializeModelProfileForDeletion({
+					session: this.ctx.session,
+					modelRegistry: this.ctx.session.modelRegistry,
+					settings: this.ctx.settings,
+					profileName,
+				});
+			}
+			deletedProfile = await this.ctx.session.modelRegistry.deleteCustomModelProfile(profileName);
+			await this.ctx.session.modelRegistry.refresh("offline");
+			await this.ctx.notifyConfigChanged?.();
+			refreshSelectorState();
+			this.ctx.showStatus(`Custom model preset deleted: ${profileLabel}`);
+			this.ctx.ui.requestRender();
+		} catch (err) {
+			let presetRestoreError: unknown;
+			if (deletedProfile) {
+				try {
+					await this.ctx.session.modelRegistry.saveCustomModelProfile(profileName, deletedProfile);
+					await this.ctx.session.modelRegistry.refresh("offline");
+				} catch (restoreErr) {
+					presetRestoreError = restoreErr;
+				}
+			}
+			if (snapshot) {
+				try {
+					await restoreMaterializedModelProfileForDeletion({
+						settings: this.ctx.settings,
+						session: this.ctx.session,
+						snapshot,
+					});
+				} catch (restoreErr) {
+					refreshSelectorState(deletedProfile ? profileName : undefined);
+					this.ctx.showError(
+						`Preset delete failed and settings rollback failed: ${restoreErr instanceof Error ? restoreErr.message : String(restoreErr)}`,
+					);
+					return;
+				}
+			}
+			if (deletedProfile) refreshSelectorState(profileName);
+			if (presetRestoreError) {
+				this.ctx.showError(
+					`Preset delete failed and preset restore failed: ${presetRestoreError instanceof Error ? presetRestoreError.message : String(presetRestoreError)}`,
+				);
+				return;
+			}
+			this.ctx.showError(`Preset delete failed: ${err instanceof Error ? err.message : String(err)}`);
+		}
 	}
 
 	showCustomProviderWizard(): void {
@@ -693,7 +803,20 @@ export class SelectorController {
 							this.showCustomModelPresetWizard(selection.profile);
 							return;
 						}
+						if (selection.kind === "renameProfile") {
+							await this.#renameCustomModelPreset(selection.profileName, modelSelector);
+							return;
+						}
+						if (selection.kind === "deleteProfile") {
+							await this.#deleteCustomModelPreset(selection.profileName, modelSelector);
+							return;
+						}
 						if (selection.kind === "profile") {
+							const profileLabel = formatModelProfileDisplayLabel(
+								this.ctx.session.modelRegistry.getModelProfile(selection.profileName) ?? {
+									name: selection.profileName,
+								},
+							);
 							await activateModelProfile(
 								{
 									session: this.ctx.session,
@@ -707,8 +830,8 @@ export class SelectorController {
 							this.ctx.updateEditorBorderColor();
 							this.ctx.showStatus(
 								selection.setDefault
-									? `Default model profile: ${selection.profileName}`
-									: `Model profile: ${selection.profileName}`,
+									? `Default model profile: ${profileLabel}`
+									: `Model profile: ${profileLabel}`,
 							);
 							done();
 							this.ctx.ui.requestRender();
@@ -1338,7 +1461,7 @@ export class SelectorController {
 			}
 		}
 
-		let externalCredentialCandidates: ReturnType<typeof filterAutoImportOAuthCredentials> = [];
+		let externalCredentialCandidates: ImportableCredential[] = [];
 		if (
 			mode === "login" &&
 			providerId === undefined &&

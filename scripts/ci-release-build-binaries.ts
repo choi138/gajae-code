@@ -20,6 +20,11 @@ const entrypoint = "./packages/coding-agent/src/cli.ts";
 // Listing the module here makes the absolute target path exist in the compiled
 // bunfs.
 const nativeTokenizerEntrypoint = "./packages/natives/native/index.js";
+// Hidden notify daemon CLI. It is loaded dynamically from notify-cli, so Bun
+// standalone only emits it into $bunfs when the file is also listed as an
+// explicit compile entrypoint. The CLI module must stay lightweight at top
+// level; keep heavy daemon runtime imports behind the actual daemon path.
+const telegramDaemonEntrypoint = "./packages/coding-agent/src/notifications/telegram-daemon-cli.ts";
 // Worker entrypoints. Bun's `--compile` static analyzer discovers the
 // literal in `new Worker("…", …)` at each spawn site, but only actually
 // emits the worker into the bunfs root when it is also listed here as an
@@ -136,7 +141,7 @@ async function buildBinary(target: BinaryTarget): Promise<void> {
 	console.log(`Building ${target.outfile}...`);
 	await embedNative(target);
 	if (isDryRun) {
-		const compileEntrypoints = [...workerEntrypoints, nativeTokenizerEntrypoint].join(" ");
+		const compileEntrypoints = [...workerEntrypoints, nativeTokenizerEntrypoint, telegramDaemonEntrypoint].join(" ");
 		console.log(`DRY RUN bun build --compile --no-compile-autoload-bunfig --no-compile-autoload-dotenv --no-compile-autoload-tsconfig --no-compile-autoload-package-json --keep-names --define process.env.PI_COMPILED="true" --root . --external mupdf --target=${target.target} ${entrypoint} ${compileEntrypoints} --outfile ${target.outfile}`);
 		return;
 	}
@@ -165,6 +170,7 @@ async function buildBinary(target: BinaryTarget): Promise<void> {
 			entrypoint,
 			...workerEntrypoints,
 			nativeTokenizerEntrypoint,
+			telegramDaemonEntrypoint,
 			"--outfile",
 			target.outfile,
 		],

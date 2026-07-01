@@ -245,7 +245,7 @@ describe("HookEditorComponent prompt-style mode", () => {
 		}
 	});
 
-	it("treats Ctrl+Enter as newline in prompt-style mode", () => {
+	it("submits on Ctrl+Enter in prompt-style mode", () => {
 		const onSubmit = vi.fn();
 		const onCancel = vi.fn();
 		const component = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, onCancel, {
@@ -255,13 +255,9 @@ describe("HookEditorComponent prompt-style mode", () => {
 		component.handleInput("x");
 		component.handleInput("\x1b[13;5u");
 
-		expect(onSubmit).not.toHaveBeenCalled();
-
-		component.handleInput("y");
-		component.handleInput("\r");
-
 		expect(onSubmit).toHaveBeenCalledTimes(1);
-		expect(onSubmit).toHaveBeenCalledWith("x\ny");
+		expect(onSubmit).toHaveBeenCalledWith("x");
+		expect(onCancel).not.toHaveBeenCalled();
 	});
 
 	it("renders prompt-style editor with legacy ask chrome", () => {

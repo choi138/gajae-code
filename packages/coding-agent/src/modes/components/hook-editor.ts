@@ -96,14 +96,17 @@ export class HookEditorComponent extends Container {
 			return;
 		}
 
-		// Submit on plain Enter encodings. On Windows, raw LF is reserved for terminal
-		// newline mappings (Shift+Enter/Ctrl+J/Ctrl+Enter); plain Enter reports CR.
-		if (!isWindowsRawLfNewlineInput(keyData) && (matchesKey(keyData, "enter") || matchesKey(keyData, "return"))) {
+		// Submit on Enter and Ctrl+Enter encodings. On Windows, raw LF is reserved for
+		// terminal newline mappings (Shift+Enter/Ctrl+J); plain Enter reports CR.
+		if (
+			!isWindowsRawLfNewlineInput(keyData) &&
+			(matchesKey(keyData, "enter") || matchesKey(keyData, "return") || matchesKey(keyData, "ctrl+enter"))
+		) {
 			this.#onSubmitCallback(this.#editor.getText());
 			return;
 		}
 
-		// Let Editor handle modified newline-producing variants (Shift+Enter, Ctrl+Enter, Alt+Enter, etc.)
+		// Let Editor handle newline-producing variants (Shift+Enter, Ctrl+J, Alt+Enter, etc.)
 		this.#editor.handleInput(keyData);
 	}
 

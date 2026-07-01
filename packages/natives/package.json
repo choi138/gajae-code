@@ -1,6 +1,6 @@
 {
 	"name": "@gajae-code/natives",
-	"version": "0.7.8",
+	"version": "0.7.9",
 	"description": "Native Rust bindings for grep, clipboard, image processing, syntax highlighting, PTY, and shell operations via N-API",
 	"type": "module",
 	"homepage": "https://gaebal-gajae.dev",
@@ -53,10 +53,20 @@
 		"triples": {}
 	},
 	"files": [
-		"src",
-		"native",
+		"native/index.js",
+		"native/index.d.ts",
+		"native/loader-state.js",
+		"native/loader-state.d.ts",
+		"native/embedded-addon.js",
 		"README.md"
 	],
+	"optionalDependencies": {
+		"@gajae-code/natives-darwin-arm64": "workspace:*",
+		"@gajae-code/natives-darwin-x64": "workspace:*",
+		"@gajae-code/natives-linux-arm64": "workspace:*",
+		"@gajae-code/natives-linux-x64": "workspace:*",
+		"@gajae-code/natives-win32-x64": "workspace:*"
+	},
 	"exports": {
 		".": {
 			"types": "./native/index.d.ts",

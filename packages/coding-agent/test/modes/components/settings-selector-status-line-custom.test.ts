@@ -16,6 +16,11 @@ interface ChangedSetting {
 	value: unknown;
 }
 
+interface SelectorOptions {
+	getStatusLinePreview?: (width?: number) => string;
+	onStatusLinePreview?: (preview: StatusLinePreviewSettings) => void;
+}
+
 beforeAll(async () => {
 	await initTheme(false, undefined, undefined, "red-claw", "blue-crab");
 });
@@ -26,7 +31,7 @@ beforeEach(async () => {
 	vi.restoreAllMocks();
 });
 
-function createSelector() {
+function createSelector(options: SelectorOptions = {}) {
 	const previews: StatusLinePreviewSettings[] = [];
 	const changedSettings: ChangedSetting[] = [];
 	const previewWidths: Array<number | undefined> = [];
@@ -39,10 +44,13 @@ function createSelector() {
 		},
 		{
 			onChange: (path, value) => changedSettings.push({ path, value }),
-			onStatusLinePreview: preview => previews.push(preview),
+			onStatusLinePreview: preview => {
+				previews.push(preview);
+				options.onStatusLinePreview?.(preview);
+			},
 			getStatusLinePreview: width => {
 				previewWidths.push(width);
-				return `preview-${width ?? "current"}`;
+				return options.getStatusLinePreview?.(width) ?? `preview-${width ?? "current"}`;
 			},
 			onCancel: () => {},
 		},
@@ -80,14 +88,14 @@ describe("SettingsSelectorComponent status line custom editor", () => {
 		settings.set("statusLine.leftSegments", []);
 		settings.set("statusLine.rightSegments", []);
 		settings.set("statusLine.segmentOptions", { path: { maxLength: 24 }, git: { showUntracked: false } });
-		const { component, previews, changedSettings, previewWidths } = createSelector();
+		const { component, previews, changedSettings } = createSelector();
 
 		openCustomEditor(component);
 
 		const opened = Bun.stripANSI(component.render(120).join("\n"));
 		expect(opened).toContain("Status Line Custom Editor");
-		expect(opened).toContain("Narrow width preview");
-		expect(previewWidths).toContain(40);
+		expect(opened).not.toContain("Current width preview");
+		expect(opened).not.toContain("Narrow width preview");
 		expect(previews.at(-1)).toMatchObject({
 			preset: "custom",
 			leftSegments: getPreset("minimal").leftSegments,
@@ -109,6 +117,45 @@ describe("SettingsSelectorComponent status line custom editor", () => {
 				"statusLine.segmentOptions",
 			]),
 		);
+	});
+	it("refreshes the parent preview while editing and cancelling custom rows", () => {
+		settings.set("statusLine.preset", "minimal");
+		let renderedPreview = "initial-preview";
+		const { component } = createSelector({
+			onStatusLinePreview: preview => {
+				renderedPreview = `preset:${preview.preset ?? "same"} left:${preview.leftSegments?.join(",") ?? "same"} highlight:${preview.previewHighlightSegment ?? "none"}`;
+			},
+			getStatusLinePreview: () => renderedPreview,
+		});
+
+		expect(Bun.stripANSI(component.render(120).join("\n"))).toContain("initial-preview");
+
+		openCustomEditor(component);
+		expect(Bun.stripANSI(component.render(120).join("\n"))).toContain("preset:custom");
+
+		for (let i = 0; i < 3; i++) component.handleInput("\x1b[B"); // Segment: gajae.
+		component.handleInput("\n"); // hidden -> left.
+		expect(Bun.stripANSI(component.render(120).join("\n"))).toContain("left:path,git,gajae");
+
+		component.handleInput("\x1b"); // Cancel restores the parent preview too.
+		const restored = Bun.stripANSI(component.render(120).join("\n"));
+		expect(restored).toContain("preset:minimal");
+		expect(restored).not.toContain("left:path,git,gajae");
+	});
+	it("keeps the description area height stable while navigating custom rows", () => {
+		settings.set("statusLine.preset", "minimal");
+		const { component } = createSelector();
+
+		openCustomEditor(component);
+
+		for (let i = 0; i < 5; i++) component.handleInput("\x1b[B"); // Segment: mode.
+		const segmentLines = component.render(120).length;
+		expect(Bun.stripANSI(component.render(120).join("\n"))).toContain("❯ Segment: mode");
+
+		component.handleInput("\x1b[B"); // Move left: mode.
+		const moveLines = component.render(120).length;
+		expect(Bun.stripANSI(component.render(120).join("\n"))).toContain("❯ Move left: mode");
+		expect(moveLines).toBe(segmentLines);
 	});
 	it("clones preset segment option defaults when saving from a preset", () => {
 		settings.set("statusLine.preset", "minimal");
@@ -144,6 +191,23 @@ describe("SettingsSelectorComponent status line custom editor", () => {
 		expect(settings.get("statusLine.rightSegments")).toEqual([]);
 	});
 
+	it("places usage mode next to the usage segment", () => {
+		settings.set("statusLine.preset", "minimal");
+		const { component } = createSelector();
+
+		openCustomEditor(component);
+
+		for (let i = 0; i < 80; i++) {
+			const rendered = Bun.stripANSI(component.render(120).join("\n"));
+			if (rendered.includes("❯ Segment: usage")) break;
+			component.handleInput("\x1b[B");
+		}
+
+		expect(Bun.stripANSI(component.render(120).join("\n"))).toContain("❯ Segment: usage");
+		component.handleInput("\x1b[B");
+		expect(Bun.stripANSI(component.render(120).join("\n"))).toContain("❯ Usage: mode");
+	});
+
 	it("edits segment placement and typed options before saving", () => {
 		settings.set("statusLine.preset", "minimal");
 		const { component } = createSelector();
@@ -169,7 +233,7 @@ describe("SettingsSelectorComponent status line custom editor", () => {
 
 		openCustomEditor(component);
 
-		component.handleInput("\x1b[A"); // Wrap from Save to the final Time: show seconds option.
+		component.handleInput("\x1b[A"); // Wrap from Save to Time: show seconds.
 		expect(previews.at(-1)?.previewHighlightSegment).toBe("time");
 		component.handleInput("\n");
 		expect(previews.at(-1)?.segmentOptions?.time?.showSeconds).toBe(true);

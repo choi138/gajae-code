@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { VERSION } from "@gajae-code/utils/dirs";
 import { safeStderrWrite } from "@gajae-code/utils/safe-stderr";
@@ -6,6 +7,7 @@ import type { Args } from "../cli/args";
 import { tmuxRuntimeSessionPath } from "./session-layout";
 import { GJC_COORDINATOR_SESSION_ID_ENV, GJC_COORDINATOR_SESSION_STATE_FILE_ENV } from "./session-state-sidecar";
 import {
+	buildGjcTmuxExactOptionTarget,
 	buildGjcTmuxExactSessionTarget,
 	buildGjcTmuxProfileCommands,
 	buildGjcTmuxSessionName,
@@ -35,6 +37,7 @@ export const GJC_TMUX_LAUNCHED_ENV = "GJC_TMUX_LAUNCHED";
 export const GJC_LAUNCH_POLICY_ENV = "GJC_LAUNCH_POLICY";
 export const GJC_TMUX_WINDOW_LABEL_MAX_WIDTH = 48;
 export const GJC_PSMUX_PROFILE_FORCE_ENV = "GJC_PSMUX_PROFILE_FORCE";
+const TERMINAL_TITLE_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
 
 type LaunchPolicy = "direct" | "tmux";
 
@@ -72,9 +75,18 @@ export type TmuxSpawnSync = (command: string, args: string[], options: TmuxSpawn
 export interface TmuxSpawnOptions {
 	cwd: string;
 	env: NodeJS.ProcessEnv;
-	stdin: "inherit";
-	stdout: "inherit";
-	stderr: "inherit";
+	stdin: "inherit" | "pipe";
+	stdout: "inherit" | "pipe";
+	stderr: "inherit" | "pipe";
+	/**
+	 * When true, the spawn captures stderr into a buffer and forwards it to
+	 * the parent stderr so the user still sees the live output. The captured
+	 * text is also returned in TmuxSpawnResult.stderr for diagnostic
+	 * surfacing in "attach failed" / "profile tagging failed" messages.
+	 * Defaults to false to preserve the previous PTY-binding behavior for
+	 * attach-session and other interactive commands.
+	 */
+	captureStderr?: boolean;
 }
 
 export interface TmuxLaunchPlan {
@@ -170,6 +182,48 @@ function formatTmuxLaunchDiagnostic(stage: string, stderr?: string): string {
 	return `gjc --tmux failed after creating tmux session: ${stage}.${suffix}\n`;
 }
 
+/**
+ * Detect a corrupted gjc.cmd / gjc.bat wrapper at well-known PATH locations.
+ * On Windows, `gjc.cmd` / `gjc.bat` files at the front of PATH that turn out
+ * to be PE-binary garbage (e.g. a 194MB PE image written over the wrapper)
+ * cause cmd.exe to hang silently when invoked from PowerShell — cmd reads
+ * the binary as text and never returns, so the user sees the prompt return
+ * with no output but no actual launch. This probe surfaces that failure mode
+ * in the diagnostic so the user gets a clear "wrapper corrupted" hint instead
+ * of a silent exit. Best-effort: returns null when the file is missing,
+ * unreadable, or under 1KB (real CMD wrappers are 100-500 bytes; the original
+ * 194MB PE-binary garbage was obviously out of band). Sync because the
+ * call site (launchDefaultTmuxIfNeeded) is sync; uses statSync + 2-byte
+ * read.
+ */
+function detectCorruptedGjcWrapper(): string | null {
+	if (process.platform !== "win32") return null;
+	const pathEnv = process.env.PATH ?? "";
+	if (!pathEnv) return null;
+	const seen = new Set<string>();
+	for (const dir of pathEnv.split(path.delimiter)) {
+		for (const name of ["gjc.cmd", "gjc.bat"]) {
+			const full = path.join(dir, name);
+			if (seen.has(full)) continue;
+			seen.add(full);
+			try {
+				const stat = fs.statSync(full);
+				if (!stat.isFile()) continue;
+				if (stat.size < 1024) continue;
+				if (stat.size > 64 * 1024) {
+					return `Detected suspicious gjc wrapper at ${full}: ${stat.size} bytes (expected <1KB). The wrapper may be corrupted; cmd.exe will hang reading it as text. Recreate it from the gjc-tmux.cmd template.`;
+				}
+				const head = fs.readFileSync(full);
+				if (head.byteLength < 2) continue;
+				const view = new Uint8Array(head);
+				if (view[0] === 0x4d && view[1] === 0x5a) {
+					return `Detected PE-binary gjc wrapper at ${full} (MZ header, ${stat.size} bytes). cmd.exe will hang reading it as text. Recreate the wrapper from the gjc-tmux.cmd template.`;
+				}
+			} catch {}
+		}
+	}
+	return null;
+}
 function formatTmuxUnavailableDiagnostic(platform: NodeJS.Platform, tmuxCommand: string): string {
 	if (platform === "win32") {
 		return (
@@ -203,24 +257,30 @@ function buildWindowsPowerShellInnerCommand(context: CommandResolutionContext, r
 	const envLines = Object.entries({ [GJC_TMUX_LAUNCHED_ENV]: "1", ...(context.extraEnv ?? {}) }).map(
 		([key, value]) => `$env:${key} = ${powershellQuote(value)}`,
 	);
-	// The inner `&` invocation must wrap the resolved gjc command in a
-	// script-block so the trailing PowerShell exec-policy flags from the
-	// outer invocation are not forwarded into the bun / node / .bat
-	// binary the gjc command resolves to. Without the wrapping, the flags
-	// reach the runtime binary and cause an immediate failure that closes
-	// the psmux pane before the gjc --tmux attach can land.
+	// Resolve the inner command and arguments. PowerShell's `&` call operator
+	// accepts a single command followed by its arguments directly (no script
+	// block needed). Wrapping the call in `& { ... }` would be invalid because
+	// adjacent single-quoted tokens inside a script block body are a parser
+	// error: `& { 'a' 'b' }` fails with "Unexpected token 'b'" because PowerShell
+	// only concatenates adjacent *double-quoted* strings, and even then only in
+	// expression position. Emitting the arguments as a comma-separated array
+	// (`& 'cmd' @('a','b')`) is also rejected because arrays are not valid as
+	// the second-and-later positional arguments to `&` in command position. The
+	// correct form is `& 'cmd' 'arg1' 'arg2'` — exactly what the joined
+	// resolvedCommand + innerArgs produces below.
 	const resolvedCommand = command.map(powershellQuote).join(" ");
 	const innerArgs = stripRootTmuxFlag(rawArgs).map(powershellQuote).join(" ");
-	const invocation = `& { ${resolvedCommand} ${innerArgs} }`;
+	const invocation = `& ${resolvedCommand} ${innerArgs}`;
 	const exitLine = "if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE } else { exit 1 }";
 	const script = [...envLines, invocation, exitLine].join("\n");
-	// PowerShell -EncodedCommand requires a UTF-16LE BOM (0xFF 0xFE) at the
-	// start of the decoded buffer; without it pwsh may misinterpret the
-	// leading bytes and reject the script with a parse error, which would
-	// kill the psmux pane before the gjc --tmux attach could land.
-	const bom = Buffer.from([0xff, 0xfe]);
+	// Encode the script as UTF-16LE base64 for pwsh -EncodedCommand. Do NOT
+	// prepend a UTF-16LE BOM (0xFF 0xFE): the BOM survives the decode and is
+	// inserted as a literal U+FEFF character in front of the first script
+	// token, which pwsh then reports as a "term not recognized" parse error
+	// (e.g. "﻿$env:GJC_TMUX_LAUNCHED"). pwsh expects the decoded buffer to
+	// start with the first character of the script, not with a BOM.
 	const body = Buffer.from(script, "utf16le");
-	const encodedCommand = Buffer.concat([bom, body]).toString("base64");
+	const encodedCommand = body.toString("base64");
 	return `pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodedCommand}`;
 }
 
@@ -250,7 +310,14 @@ export function applyGjcTmuxProfile(context: GjcTmuxProfileContext): GjcTmuxProf
 	if (commands.length === 0) return { skipped: true, commands: [], failures: [] };
 	const spawnSync = context.spawnSync ?? defaultSpawnSync;
 	const cwd = context.cwd ?? process.cwd();
-	const options: TmuxSpawnOptions = { cwd, env, stdin: "inherit", stdout: "inherit", stderr: "inherit" };
+	const options: TmuxSpawnOptions = {
+		cwd,
+		env,
+		stdin: "inherit",
+		stdout: "inherit",
+		stderr: "inherit",
+		captureStderr: true,
+	};
 	const failures: GjcTmuxProfileResult["failures"] = [];
 	for (const command of commands) {
 		const result = spawnSync(context.tmuxCommand, command.args, options);
@@ -321,6 +388,8 @@ function truncateVisibleTail(value: string, maxWidth: number): string {
 }
 
 const GJC_TMUX_WINDOW_BRANCH_SEPARATOR = "-";
+const GJC_TMUX_WINDOW_TITLE_PREFIX = "GJC-";
+const GJC_TMUX_TERMINAL_TITLE_PREFIX = "GJC: ";
 
 function sanitizeTmuxWindowTitleSegment(value: string): string {
 	return value.replace(/:+/g, "-");
@@ -333,20 +402,68 @@ function sanitizeTmuxWindowProjectName(project: string): string {
 	return sanitizeTmuxWindowTitleSegment(trimmed);
 }
 
-export function buildGjcTmuxWindowTitle(cwd: string, branch: string | null | undefined): string {
+function buildGjcTmuxPrefixedTitle(prefix: string, cwd: string, branch: string | null | undefined): string {
 	const project = sanitizeTmuxWindowProjectName(path.basename(path.resolve(cwd)) || "gjc");
+	const projectTitle = `${prefix}${project}`;
 	const trimmedBranch = sanitizeTmuxWindowTitleSegment(branch?.trim() ?? "");
-	if (!trimmedBranch) return truncateVisible(project, GJC_TMUX_WINDOW_LABEL_MAX_WIDTH);
+	if (!trimmedBranch) return truncateVisible(projectTitle, GJC_TMUX_WINDOW_LABEL_MAX_WIDTH);
 
 	const separatorWidth = visibleWidth(GJC_TMUX_WINDOW_BRANCH_SEPARATOR);
-	const projectWidth = visibleWidth(project);
-	const fullTitle = `${project}${GJC_TMUX_WINDOW_BRANCH_SEPARATOR}${trimmedBranch}`;
+	const projectWidth = visibleWidth(projectTitle);
+	const fullTitle = `${projectTitle}${GJC_TMUX_WINDOW_BRANCH_SEPARATOR}${trimmedBranch}`;
 	if (visibleWidth(fullTitle) <= GJC_TMUX_WINDOW_LABEL_MAX_WIDTH) return fullTitle;
 
 	const remainingBranchWidth = GJC_TMUX_WINDOW_LABEL_MAX_WIDTH - projectWidth - separatorWidth;
-	if (remainingBranchWidth <= 0) return truncateVisible(project, GJC_TMUX_WINDOW_LABEL_MAX_WIDTH);
+	if (remainingBranchWidth <= 0) return truncateVisible(projectTitle, GJC_TMUX_WINDOW_LABEL_MAX_WIDTH);
 
-	return `${project}${GJC_TMUX_WINDOW_BRANCH_SEPARATOR}${truncateVisibleTail(trimmedBranch, remainingBranchWidth)}`;
+	return `${projectTitle}${GJC_TMUX_WINDOW_BRANCH_SEPARATOR}${truncateVisibleTail(trimmedBranch, remainingBranchWidth)}`;
+}
+
+export function buildGjcTmuxWindowTitle(cwd: string, branch: string | null | undefined): string {
+	return buildGjcTmuxPrefixedTitle(GJC_TMUX_WINDOW_TITLE_PREFIX, cwd, branch);
+}
+
+function buildGjcTmuxRootTerminalTitle(cwd: string, branch: string | null | undefined): string {
+	return buildGjcTmuxPrefixedTitle(GJC_TMUX_TERMINAL_TITLE_PREFIX, cwd, branch);
+}
+
+function sanitizeGjcTmuxRootTerminalTitle(title: string): string {
+	return title.replace(TERMINAL_TITLE_CONTROL_CHARS, "").trim() || "GJC";
+}
+
+function escapeTmuxFormatLiteral(value: string): string {
+	return value.replace(/#/g, "##");
+}
+
+function buildGjcTmuxRootTerminalTitleCommands(target: string, title: string): GjcTmuxProfileCommand[] {
+	const sanitized = escapeTmuxFormatLiteral(sanitizeGjcTmuxRootTerminalTitle(title));
+	return [
+		{ description: "enable tmux client terminal title", args: ["set-option", "-t", target, "set-titles", "on"] },
+		{
+			description: "set tmux client terminal title",
+			args: ["set-option", "-t", target, "set-titles-string", sanitized],
+		},
+	];
+}
+
+function applyGjcTmuxRootTerminalTitleProfile(context: {
+	tmuxCommand: string;
+	target: string;
+	title: string | undefined;
+	spawnSync: TmuxSpawnSync;
+	options: TmuxSpawnOptions;
+}): void {
+	if (!context.title) return;
+	for (const command of buildGjcTmuxRootTerminalTitleCommands(
+		buildGjcTmuxExactOptionTarget(context.target, { env: context.options.env }),
+		context.title,
+	)) {
+		context.spawnSync(context.tmuxCommand, command.args, context.options);
+	}
+}
+
+function shouldSetGjcTmuxRootTerminalTitle(parsed: Args, env: NodeJS.ProcessEnv): boolean {
+	return !parsed.noTitle && !env.PI_NO_TITLE;
 }
 
 function buildTmuxRenameWindowArgs(title: string, target?: string): string[] {
@@ -490,15 +607,33 @@ export function buildDefaultTmuxLaunchPlan(context: TmuxLaunchContext): TmuxLaun
 }
 
 function defaultSpawnSync(command: string, args: string[], options: TmuxSpawnOptions): TmuxSpawnResult {
+	// When captureStderr is set on the options, route stderr through a
+	// pipe so we can both forward it to the parent stderr (so the user
+	// still sees the live output) and retain it in TmuxSpawnResult.stderr
+	// for diagnostic surfacing. PTY-bound commands (attach-session) keep
+	// stderr: "inherit" because psmux needs a real terminal handle.
+	const stdio = options.captureStderr
+		? { stdin: options.stdin, stdout: options.stdout, stderr: "pipe" as const }
+		: { stdin: options.stdin, stdout: options.stdout, stderr: options.stderr };
 	const result = Bun.spawnSync({
 		cmd: [command, ...args],
 		cwd: options.cwd,
 		env: options.env,
-		stdin: options.stdin,
-		stdout: options.stdout,
-		stderr: options.stderr,
+		...stdio,
 	});
-	return { exitCode: result.exitCode, signalCode: result.signalCode };
+	let stderrText: string | undefined;
+	if (options.captureStderr) {
+		const stderrBytes = result.stderr;
+		stderrText = stderrBytes ? new TextDecoder().decode(stderrBytes) : "";
+		if (stderrText.length > 0) {
+			try {
+				process.stderr.write(stderrText);
+			} catch {
+				// parent stderr already closed during shutdown; ignore.
+			}
+		}
+	}
+	return { exitCode: result.exitCode, signalCode: result.signalCode, stderr: stderrText };
 }
 
 export function launchDefaultTmuxIfNeeded(context: TmuxLaunchContext): boolean {
@@ -515,27 +650,64 @@ export function launchDefaultTmuxIfNeeded(context: TmuxLaunchContext): boolean {
 		stdout: "inherit",
 		stderr: "inherit",
 	};
+	const attachOptions: TmuxSpawnOptions = { ...options };
+	const controlOptions: TmuxSpawnOptions = { ...options, captureStderr: true };
+	// has-session / new-session retry / profile-tagging probe share these
+	// pipe-stdio options. PTY-bound commands (attach-session, rename-window,
+	// set-option in applyGjcTmuxProfile when we explicitly need the live TTY)
+	// use `options` or `attachOptions` instead.
+	const probeOptions: TmuxSpawnOptions = {
+		...options,
+		stdin: "pipe",
+		stdout: "pipe",
+		stderr: "pipe",
+		captureStderr: true,
+	};
+	// new-session needs pipe stdio (not inherit) because the user terminal must
+	// remain untouched until attach-session takes over. Inheriting psmux's
+	// stdout/stderr for new-session can corrupt the terminal state or race with
+	// attach-session on Windows, where psmux 3.3.0/3.3.6's server can die if it
+	// sees the controlling TTY in an inconsistent state mid-spawn. Capturing
+	// both streams also gives the diagnostic writer the full error detail when
+	// new-session itself fails.
+	const newSessionOptions: TmuxSpawnOptions = {
+		...options,
+		stdin: "pipe",
+		stdout: "pipe",
+		stderr: "pipe",
+		captureStderr: true,
+	};
+
+	const windowTitle = buildGjcTmuxWindowTitle(plan.project ?? plan.cwd, plan.branch);
+	const rootTerminalTitle = shouldSetGjcTmuxRootTerminalTitle(context.parsed, env)
+		? buildGjcTmuxRootTerminalTitle(plan.project ?? plan.cwd, plan.branch)
+		: undefined;
 
 	if (plan.attachSessionName) {
+		applyGjcTmuxRootTerminalTitleProfile({
+			tmuxCommand: plan.tmuxCommand,
+			target: plan.attachSessionName,
+			title: rootTerminalTitle,
+			spawnSync,
+			options,
+		});
 		const attached = spawnSync(
 			plan.tmuxCommand,
 			["attach-session", "-t", buildGjcTmuxExactSessionTarget(plan.attachSessionName, { env })],
-			options,
+			attachOptions,
 		);
 		if (attached.exitCode === 0) return true;
 	}
-
-	const created = spawnSync(plan.tmuxCommand, plan.newSessionArgs, options);
+	const created = spawnSync(plan.tmuxCommand, plan.newSessionArgs, newSessionOptions);
 	if (created.exitCode === 0) {
-		renameTmuxWindow(
-			plan.tmuxCommand,
-			buildGjcTmuxWindowTitle(plan.project ?? plan.cwd, plan.branch),
-			spawnSync,
-			options,
-			buildGjcTmuxExactSessionTarget(plan.sessionName, { env }),
-		);
-
-		const profile = applyGjcTmuxProfile({
+		// On Windows + psmux 3.3.0/3.3.6, new-session can return exit 0
+		// before the psmux server finishes registering the session on its
+		// control socket. The follow-up set-option / attach-session then
+		// fails with "can't find session / no server running". Probe the
+		// server first, and if the race fired, retry new-session before
+		// we hand the session to rename-window / applyGjcTmuxProfile so the
+		// profile-tagging path always sees a registered session.
+		const buildProfileInputs = (): GjcTmuxProfileContext => ({
 			tmuxCommand: plan.tmuxCommand,
 			target: plan.sessionName,
 			cwd: plan.cwd,
@@ -547,20 +719,105 @@ export function launchDefaultTmuxIfNeeded(context: TmuxLaunchContext): boolean {
 			sessionStateFile: plan.sessionStateFile ?? null,
 			version: VERSION,
 		});
+		const probeHasSession = (): TmuxSpawnResult =>
+			spawnSync(
+				plan.tmuxCommand,
+				["has-session", "-t", buildGjcTmuxExactSessionTarget(plan.sessionName, { env })],
+				probeOptions,
+			);
+		const probeResult = probeHasSession();
+		if (probeResult.exitCode !== 0) {
+			const retry = spawnSync(plan.tmuxCommand, plan.newSessionArgs, newSessionOptions);
+			const retryProbe = probeHasSession();
+			if (retry.exitCode !== 0 || retryProbe.exitCode !== 0) {
+				(context.diagnosticWriter ?? safeStderrWrite)(
+					formatTmuxLaunchDiagnostic(
+						"new-session retry failed after missing session",
+						retry.stderr ?? retryProbe.stderr ?? created.stderr,
+					),
+				);
+				cleanupCreatedTmuxSession(plan, spawnSync, options);
+				return false;
+			}
+		}
+		renameTmuxWindow(
+			plan.tmuxCommand,
+			windowTitle,
+			spawnSync,
+			controlOptions,
+			buildGjcTmuxExactSessionTarget(plan.sessionName, { env }),
+		);
+		const profile = applyGjcTmuxProfile(buildProfileInputs());
+		// If the @gjc-profile ownership write failed, the cause can be
+		// either (a) a real psmux persistence-tag rejection (e.g.
+		// unsupported option on this server), or (b) the same new-session
+		// registration race above — psmux returned 0 but the server died
+		// before registering, so the follow-up set-option failed with
+		// "can't find session". Distinguish the two: re-probe; if the
+		// session is genuinely missing, retry new-session and re-apply the
+		// profile. Otherwise, surface the persistence-tag failure.
 		const ownershipFailure = profile.failures.find(item => item.command.args.includes("@gjc-profile"));
 		if (ownershipFailure) {
-			cleanupCreatedTmuxSession(plan, spawnSync, options);
-			(context.diagnosticWriter ?? safeStderrWrite)(
-				formatTmuxLaunchDiagnostic("profile tagging failed", ownershipFailure.stderr),
-			);
-			return true;
+			const probeAfterOwnership = probeHasSession();
+			if (probeAfterOwnership.exitCode === 0) {
+				// Session is present; tagging failed for a real reason.
+				cleanupCreatedTmuxSession(plan, spawnSync, options);
+				(context.diagnosticWriter ?? safeStderrWrite)(
+					formatTmuxLaunchDiagnostic("profile tagging failed", ownershipFailure.stderr),
+				);
+				return true;
+			}
+			// Session is missing — retry.
+			const retry = spawnSync(plan.tmuxCommand, plan.newSessionArgs, newSessionOptions);
+			const retryProbe = probeHasSession();
+			if (retry.exitCode !== 0 || retryProbe.exitCode !== 0) {
+				cleanupCreatedTmuxSession(plan, spawnSync, options);
+				(context.diagnosticWriter ?? safeStderrWrite)(
+					formatTmuxLaunchDiagnostic(
+						"new-session retry failed after ownership failure",
+						retry.stderr ?? retryProbe.stderr ?? ownershipFailure.stderr,
+					),
+				);
+				return true;
+			}
+			const retryProfile = applyGjcTmuxProfile(buildProfileInputs());
+			const retryOwnershipFailure = retryProfile.failures.find(item => item.command.args.includes("@gjc-profile"));
+			if (retryOwnershipFailure) {
+				cleanupCreatedTmuxSession(plan, spawnSync, options);
+				(context.diagnosticWriter ?? safeStderrWrite)(
+					formatTmuxLaunchDiagnostic("profile tagging failed after retry", retryOwnershipFailure.stderr),
+				);
+				return true;
+			}
+			// Recovery succeeded via retry — fall through to attach-session below.
 		}
+		applyGjcTmuxRootTerminalTitleProfile({
+			tmuxCommand: plan.tmuxCommand,
+			target: plan.sessionName,
+			title: rootTerminalTitle,
+			spawnSync,
+			options,
+		});
 	}
-	if (created.exitCode !== 0) return false;
+	const probeWarning = detectCorruptedGjcWrapper();
+	if (created.exitCode !== 0) {
+		// The new-session spawn failed. Surface the captured stderr so the
+		// user sees the actual psmux rejection (e.g. "cannot create session:
+		// server is shutting down") instead of a silent exit. The wrapper
+		// probe gives the user a deterministic hint when the silent-exit
+		// symptom is actually caused by a corrupted gjc.cmd / gjc.bat on
+		// PATH (a 194MB PE-binary at the wrapper path produces cmd.exe
+		// hangs that look like a tmux/psmux failure from the user's seat).
+		const stderr = created.stderr;
+		const suffix = probeWarning ? ` Wrapper warning: ${probeWarning}` : "";
+		(context.diagnosticWriter ?? safeStderrWrite)(formatTmuxLaunchDiagnostic("new-session failed", stderr) + suffix);
+		return false;
+	}
+	// attach-session needs PTY inherit for the user-facing attach; keep it unchanged.
 	const attached = spawnSync(
 		plan.tmuxCommand,
 		["attach-session", "-t", buildGjcTmuxExactSessionTarget(plan.sessionName, { env })],
-		options,
+		attachOptions,
 	);
 	if (attached.exitCode === 0) return true;
 	if (isTmuxAttachDisconnectError(attached)) {

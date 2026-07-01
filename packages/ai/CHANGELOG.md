@@ -6,6 +6,12 @@
 
 - Retried retryable OpenAI Codex Responses stream truncation and incomplete-stream failures before output starts, including `upstream_stream_truncated`, `stream_incomplete`, and terminal-event-missing responses.
 
+## [0.7.9] - 2026-07-01
+
+### Fixed
+
+- Mapped DeepSeek-style `prompt_cache_hit_tokens` and `prompt_cache_miss_tokens` usage fields into OpenAI-compatible prompt-cache accounting (#1329).
+
 ## [0.7.5] - 2026-06-27
 
 ### Fixed

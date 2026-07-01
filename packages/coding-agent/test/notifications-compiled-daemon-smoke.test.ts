@@ -11,6 +11,70 @@ describe("compiled daemon smoke coverage", () => {
 		return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 	}
 
+	async function runWithTimeout(
+		command: string[],
+		opts: { cwd: string },
+		timeoutMs: number,
+	): Promise<{
+		exitCode: number | null;
+		stdout: string;
+		stderr: string;
+		timedOut: boolean;
+	}> {
+		const proc = Bun.spawn(command, {
+			...opts,
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		let timedOut = false;
+		const timeout = new Promise<null>(resolve => {
+			const timer = setTimeout(() => {
+				timedOut = true;
+				proc.kill();
+				resolve(null);
+			}, timeoutMs);
+			proc.exited.finally(() => clearTimeout(timer));
+		});
+		const [exitCode, stdout, stderr] = await Promise.all([
+			Promise.race([proc.exited, timeout]),
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+		]);
+		return { exitCode, stdout, stderr, timedOut };
+	}
+
+	async function buildCompiledDaemonSmokeBinary(outPath: string): Promise<void> {
+		const proc = Bun.spawn(
+			[
+				"bun",
+				"build",
+				"--compile",
+				"--no-compile-autoload-bunfig",
+				"--no-compile-autoload-dotenv",
+				"--no-compile-autoload-tsconfig",
+				"--no-compile-autoload-package-json",
+				"--keep-names",
+				"--define",
+				'process.env.PI_COMPILED="true"',
+				"--root",
+				".",
+				"--external",
+				"mupdf",
+				"./packages/coding-agent/src/cli.ts",
+				"./packages/coding-agent/src/notifications/telegram-daemon-cli.ts",
+				"--outfile",
+				outPath,
+			],
+			{ cwd: repoRoot, stdout: "pipe", stderr: "pipe" },
+		);
+		const [exitCode, stdout, stderr] = await Promise.all([
+			proc.exited,
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+		]);
+		expect(`${exitCode}\n${stdout}\n${stderr}`).toStartWith("0\n");
+	}
+
 	test("hidden daemon CLI smoke creates and removes its temp lock without leaking tokens", async () => {
 		const agentDir = tempDir("gjc-compiled-daemon-agent-");
 		const cwd = tempDir("gjc-compiled-daemon-cwd-");
@@ -52,9 +116,35 @@ describe("compiled daemon smoke coverage", () => {
 		expect(fs.readdirSync(paths.dir).filter(name => name.includes(".smoke."))).toEqual([]);
 	});
 
-	test("build script preserves the dynamic daemon entrypoint for compiled binaries", () => {
-		const buildScript = fs.readFileSync(path.join(repoRoot, "packages/coding-agent/scripts/build-binary.ts"), "utf8");
-		expect(buildScript).toContain("telegram-daemon-cli.ts");
+	test("compiled binary with daemon CLI entrypoint starts root version and daemon smoke", async () => {
+		const temp = tempDir("gjc-compiled-daemon-binary-");
+		const binaryPath = path.join(temp, "gjc-repro");
+		try {
+			await buildCompiledDaemonSmokeBinary(binaryPath);
+			const version = await runWithTimeout([binaryPath, "--version"], { cwd: temp }, 10_000);
+			expect(version.timedOut).toBe(false);
+			expect(`${version.exitCode}\n${version.stdout}\n${version.stderr}`).toStartWith("0\ngjc/");
+
+			const smoke = await runWithTimeout(
+				[binaryPath, "notify", "daemon-internal", "--smoke"],
+				{ cwd: temp },
+				10_000,
+			);
+			expect(smoke.timedOut).toBe(false);
+			expect(`${smoke.exitCode}\n${smoke.stdout}\n${smoke.stderr}`).toStartWith("0\n");
+		} finally {
+			fs.rmSync(temp, { recursive: true, force: true });
+		}
+	});
+
+	test("build scripts preserve the dynamic daemon entrypoint for compiled binaries", () => {
+		const devBuildScript = fs.readFileSync(
+			path.join(repoRoot, "packages/coding-agent/scripts/build-binary.ts"),
+			"utf8",
+		);
+		const releaseBuildScript = fs.readFileSync(path.join(repoRoot, "scripts/ci-release-build-binaries.ts"), "utf8");
+		expect(devBuildScript).toContain("telegram-daemon-cli.ts");
+		expect(releaseBuildScript).toContain("telegram-daemon-cli.ts");
 	});
 
 	test("compiled-mode spawn args self-spawn the binary without a script prefix and carry a reload warning", () => {

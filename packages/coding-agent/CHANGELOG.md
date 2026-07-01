@@ -6,6 +6,19 @@
 
 - Classified Codex stream truncation and incomplete-stream errors as transient so context-overflow compaction can retry interrupted summary attempts instead of failing immediately.
 
+## [0.7.9] - 2026-07-01
+### Added
+
+- Added an optional Tavily web search provider selectable through `providers.webSearch`, using `TAVILY_API_KEY` only when Tavily is selected (#1323).
+
+### Fixed
+
+- Deep Interview now treats English `implementation` and Korean `구현` wording as eventual-target language, not permission to edit code or launch implementation before post-interview approval (#1320).
+- Restored default Enter = submit in the main chat composer. #1326 rerouted plain Enter in the prompt to insert a newline (making Ctrl+Enter the submit chord); this reverts that so Enter submits again and Shift+Enter inserts a newline.
+- Registered the optional `gjc acp` subcommand so Zed/custom ACP clients can launch the ACP stdio server through the documented command entrypoint, and documented the Zed `agent_servers` custom-agent shape (#1327).
+- Compiled binaries can now include the hidden Telegram daemon CLI entrypoint without hanging root startup, and release builds preserve that entry so `gjc notify daemon-internal --smoke` is available in standalone binaries (#1288).
+- Documented Windows Terminal BEL limitations for terminal bell notifications and added a PowerShell `completion.notifyCommand` beep workaround example (#1318).
+
 ## [0.7.8] - 2026-06-30
 ### Added
 
@@ -15,13 +28,18 @@
 
 ### Fixed
 
+- Fixed a class of TUI renderer crashes (`TypeError: undefined is not an object (evaluating 'x.trim'/'x.split')`) where render helpers typed `(x: string)` ran a string op on an optional/possibly-undefined tool-detail field. The deep-interview/ralplan `ask` renderer crashed on a result with a missing `question`; caught during streaming but fatal on render/teardown paths such as `/background` detach. Hardened `normalizeText`, `getPreviewLines`, `shortenPath`, and the eval git_log status-event renderer (#1290).
+
 - `gjc update` now verifies the installed runtime after package-manager failures and treats a nonzero Bun/npm exit as recoverable when the requested version and smoke test actually landed, avoiding false failures from Bun tarball extraction errors (#1280).
+- Deep Interview now prefers the native hook's pre-resolved ambiguity threshold state and avoids surfacing missing optional settings files as failed `Read` calls during Phase 0.
+- Scoped Ultragoal ask-guard checks for `deep-interview` and `ralplan` asks to the current session, so stale or ambiguous Ultragoal state from other sessions no longer suppresses the choice UI while same-session active Ultragoal blockers still apply.
 - Submitted user prompts now use the live terminal viewport width in wide Windows Terminal/PowerShell sessions, keeping Korean/CJK prompt wrapping responsive without changing narrow layouts (#1239).
 - Coordinator MCP now fails tmux-delivered turns that never receive a runtime prompt acknowledgement/`turn_start`, surfacing an explicit unacknowledged delivery reason instead of leaving Hermes/Oren waiting on a normal active/running state (#1237).
 - Telegram now advertises `/session_create`, `/session_recent`, `/session_close`, and `/session_resume` in the bot command menu so lifecycle control commands are discoverable from `/` autocomplete.
 ### Added
 
 - Added a `codex-lb` provider onboarding preset that configures a local OpenAI Responses proxy at `http://127.0.0.1:2455/v1` with the `CODEX_LB_API_KEY` environment variable and `gpt-5.4` model.
+- `gjc --tmux` now prefixes the root terminal title (`GJC: tmp`) and managed tmux window names (`GJC-tmp`) with a GJC workspace label so terminal multiplexers and workspace switchers do not fall back to noisy launch paths.
 
 ## [0.7.7] - 2026-06-28
 ### Added

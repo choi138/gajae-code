@@ -118,7 +118,7 @@ export const KEYBINDINGS = {
 	},
 	"app.message.followUp": {
 		defaultKeys: [],
-		description: "Send follow-up message (no default; Ctrl+Enter inserts a newline)",
+		description: "Send follow-up message (no default; Ctrl+Enter submits)",
 	},
 	"app.message.queue": {
 		defaultKeys: "alt+enter",

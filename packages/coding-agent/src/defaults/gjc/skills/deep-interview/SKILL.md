@@ -51,6 +51,10 @@ Inspired by the [Ouroboros project](https://github.com/Q00/ouroboros) which demo
 - Keep prompt payloads budgeted: summarize or trim oversized initial context/history before composing question, scoring, spec, or handoff prompts
 - If the user's initial context is oversized, create a concise prompt-safe summary first and wait for that summary before ambiguity scoring, question generation, or downstream execution handoff
 - Do not proceed to execution until ambiguity ≤ the resolved threshold for this run and the user explicitly approves a scoped execution path
+- Treat user wording such as `implementation`, "implementation plan", Korean `구현`, or "구현 계획" as describing the eventual target, not permission to implement now.
+- While still in deep-interview, do not implement, edit/write code, launch implementation workers, or start task/skill/ultragoal implementation; continue interviewing for scope, risks, acceptance criteria, and unknowns.
+- When the user wants interview output for eventual implementation, say: "I can interview for an implementation plan, but I won't implement during deep-interview." Then continue clarifying scope, risks, acceptance criteria, and unknowns.
+- Implementation requires an explicit phase transition/approval after the interview: deep-interview must first produce its spec/handoff, the workflow phase must explicitly transition out of deep-interview, and execution approval must be captured by a downstream execution path.
 - Allow early exit with a clear warning if ambiguity is still high
 - Persist interview state for resume across session interruptions
 - A multi-persona lateral-review panel convenes at ambiguity-milestone transitions (and before synthesizing any agent-supplied answer) to expose blind spots from independent perspectives
@@ -74,7 +78,7 @@ Inspired by the [Ouroboros project](https://github.com/Q00/ouroboros) which demo
 
 ## Native Plugin Invocation Guard (Issue #3030)
 
-If this raw bundled skill is loaded by GJC's native skill loader through `/skill:deep-interview`, do not treat that path as permission to skip rendered GJC setup. The user-facing invocation is `/skill:deep-interview`; do not recommend or advertise CLI bridge commands as the deep-interview entrypoint. Regardless of invocation path, Phase 0 below remains blocking and must resolve `gjc.deepInterview.ambiguityThreshold` from settings before any announcement, state write, question, or ambiguity score.
+If this raw bundled skill is loaded by GJC's native skill loader through `/skill:deep-interview`, do not treat that path as permission to skip rendered GJC setup. The user-facing invocation is `/skill:deep-interview`; do not recommend or advertise CLI bridge commands as the deep-interview entrypoint. Regardless of invocation path, Phase 0 below remains blocking and must resolve `gjc.deepInterview.ambiguityThreshold` from pre-resolved native state or settings before any announcement, state write, question, or ambiguity score.
 
 ## Corrupt current-session state recovery
 
@@ -84,20 +88,24 @@ When deep-interview detects its own current-session state is corrupt, tampered, 
 
 Complete this phase before Phase 1, before brownfield exploration, before GJC state persistence, before Round 0, and before any ambiguity scoring. Do not continue if the resolved threshold and source are unknown.
 
-1. **Read threshold settings in precedence order**:
+1. **Prefer pre-resolved native state**:
+   - First inspect active deep-interview state with `gjc state deep-interview read --json`.
+   - If state contains a finite numeric `threshold` and a non-empty `threshold_source`, use those values, set `<resolvedThreshold>`, `<resolvedThresholdPercent>`, and `<resolvedThresholdSource>`, and skip optional settings-file reads. This is the normal `/skill:deep-interview` path because the native hook already resolved settings quietly before loading the skill.
+2. **Only if native state lacks a resolved threshold, read threshold settings in precedence order**:
    - User settings: `[$GJC_CONFIG_DIR|~/.gjc]/settings.json`
    - Project settings: `./.gjc/settings.json` (overrides user settings)
-2. **Resolve threshold and source**:
-   - Read `gjc.deepInterview.ambiguityThreshold` from both files when present.
+   - Read `gjc.deepInterview.ambiguityThreshold` only from files that are known to exist; optional settings-file absence is expected and must not be surfaced as failed `Read` calls.
+   - Do not probe arbitrary ancestor candidates such as `../../.gjc/settings.json`; use the current project `.gjc/settings.json` and user settings only.
+3. **Resolve threshold and source**:
    - Use the project value when valid; otherwise use the user value when valid; otherwise use the default `0.05`.
    - Set these run variables exactly: `<resolvedThreshold>`, `<resolvedThresholdPercent>`, and `<resolvedThresholdSource>` (for example `./.gjc/settings.json`, `[$GJC_CONFIG_DIR|~/.gjc]/settings.json`, or `default`).
-3. **Emit the required first line to the user before any other interview announcement**:
+4. **Emit the required first line to the user before any other interview announcement**:
 
 ```
 Deep Interview threshold: <resolvedThresholdPercent> (source: <resolvedThresholdSource>)
 ```
 
-4. **Carry threshold source forward mechanically**:
+5. **Carry threshold source forward mechanically**:
    - Substitute `<resolvedThreshold>`, `<resolvedThresholdPercent>`, and `<resolvedThresholdSource>` throughout the remaining instructions before continuing.
    - Include `threshold_source` in the first `gjc state write` payload and preserve it on later state updates; do not edit `.gjc/_session-{sessionid}/state` files directly unless an explicit force override is active.
    - Include both threshold and source in the final spec metadata.

@@ -8,6 +8,7 @@ import { CountdownTimer } from "./countdown-timer";
 import { DynamicBorder } from "./dynamic-border";
 
 export interface HookInputOptions {
+	initialValue?: string;
 	tui?: TUI;
 	timeout?: number;
 	onTimeout?: () => void;
@@ -54,6 +55,9 @@ export class HookInputComponent extends Container {
 		}
 
 		this.#input = new Input();
+		if (opts?.initialValue) {
+			this.#input.setValue(opts.initialValue);
+		}
 		this.addChild(this.#input);
 		this.addChild(new Spacer(1));
 		this.addChild(new Text(theme.fg("dim", "enter submit  esc cancel"), 1, 0));

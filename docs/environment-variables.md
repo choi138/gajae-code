@@ -40,6 +40,7 @@ These are consumed via `getEnvApiKey()` (`packages/ai/src/stream.ts`) unless not
 | `GOOGLE_API_KEY`                | Gemini image tool auth fallback                  | Using `gemini_image` tool without `GEMINI_API_KEY`             | Used by coding-agent image tool fallback path                                                       |
 | `GROQ_API_KEY`                  | Groq auth                                        | Using Groq models                                              |                                                                                                     |
 | `CEREBRAS_API_KEY`              | Cerebras auth                                    | Using Cerebras models                                          |                                                                                                     |
+| `DEEPINFRA_API_KEY`             | DeepInfra auth                                  | Using `deepinfra` provider                                      | OpenAI-compatible Chat Completions endpoint; use `serviceTier: priority` for DeepInfra priority inference |
 | `FIREWORKS_API_KEY`             | Fireworks auth                                   | Using Fireworks models                                         |                                                                                                     |
 | `TOGETHER_API_KEY`              | Together auth                                    | Using `together` provider                                      |                                                                                                     |
 | `HUGGINGFACE_HUB_TOKEN`         | Hugging Face auth                                | Using `huggingface` provider                                   | Primary Hugging Face token env var                                                                  |
@@ -339,7 +340,7 @@ OAuth host chain: `KIMI_CODE_OAUTH_HOST` → `KIMI_OAUTH_HOST` → `https://auth
 
 | Variable                   | Default / behavior                                              |
 | -------------------------- | --------------------------------------------------------------- |
-| `GJC_AI_GEMINI_CLI_VERSION` | Overrides Gemini CLI user-agent version tag (`0.35.3` if unset) |
+| `GJC_AI_GEMINI_CLI_VERSION` | Overrides Gemini CLI user-agent version tag (`0.49.0` if unset). `PI_AI_GEMINI_CLI_VERSION` remains supported as a legacy fallback. |
 
 ### OpenAI code provider responses (feature/debug controls)
 

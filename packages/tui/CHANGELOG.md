@@ -2,11 +2,18 @@
 
 ## [Unreleased]
 
+## [0.7.9] - 2026-07-01
+
+### Fixed
+
+- Reverted the composer Enter/Shift+Enter handling to the 0.7.8 behavior. A recent restructure (#1298 and follow-ups) changed how plain Enter, Ctrl+Enter, and bare-LF Enter were routed and regressed prompt submission for some terminals; the submit/newline branches are now restored to their 0.7.8 form so Enter submits and Shift+Enter inserts a newline.
+
 ## [0.7.8] - 2026-06-30
 
 ### Fixed
 
 - The render loop now isolates a component whose `render()` throws: the failure is logged once and replaced with a `[render error: <Name>]` fallback line instead of escaping the frame and tripping the process-level fail-fast `uncaughtException` exit. Previously any unguarded renderer fault (e.g. a tool renderer fed an undefined field) crashed the whole app on whatever triggered the next frame — a keystroke, resize, or command such as `/background` (#1291).
+- `truncateToWidth` now coerces its required napi `text` argument to a safe string, mirroring the existing nullish guards for `maxWidth`/`ellipsis`/`pad`. Renderers that passed an optional/possibly-undefined field no longer crash with a napi String conversion / `undefined is not an object` error (#1290).
 
 - Resolved terminal dimensions from the live TTY window size before stream defaults so wide Windows Terminal/PowerShell sessions render against the actual viewport width (#1239).
 

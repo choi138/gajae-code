@@ -10,6 +10,7 @@ import type { DaemonRuntimeInfo } from "../daemon/control-types";
 import { resolveGjcRuntimeSpawnInfo } from "../daemon/runtime";
 import { getNotificationConfig, isGloballyConfigured, tokenFingerprint } from "./config";
 import { parseInThreadConfigCommand } from "./config-commands";
+import { daemonPaths } from "./daemon-paths";
 import { buildCompactChoiceGrid, TELEGRAM_PARSE_MODE } from "./html-format";
 import type {
 	SessionCloseTarget,
@@ -62,16 +63,6 @@ export interface DaemonState {
 	version: 1;
 	stoppedAt?: number;
 }
-
-export interface DaemonPaths {
-	dir: string;
-	lock: string;
-	state: string;
-	roots: string;
-	steal: string;
-	aliases: string;
-}
-
 export interface TelegramDaemonFs {
 	mkdir(path: string, opts?: fs.MakeDirectoryOptions): Promise<void>;
 	readFile(path: string, encoding: BufferEncoding): Promise<string>;
@@ -184,17 +175,7 @@ async function fetchWithRetry(
 	throw lastErr;
 }
 
-export function daemonPaths(agentDir: string): DaemonPaths {
-	const dir = path.join(agentDir, "notifications");
-	return {
-		dir,
-		lock: path.join(dir, "telegram-daemon.lock"),
-		state: path.join(dir, "telegram-daemon.state.json"),
-		roots: path.join(dir, "telegram-daemon.roots.json"),
-		steal: path.join(dir, "telegram-daemon.steal"),
-		aliases: path.join(dir, "telegram-callback-aliases.json"),
-	};
-}
+export { type DaemonPaths, daemonPaths } from "./daemon-paths";
 
 /**
  * Attach session-lifecycle control (create/close/resume) to the running daemon.

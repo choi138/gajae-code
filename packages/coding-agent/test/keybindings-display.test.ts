@@ -40,7 +40,7 @@ describe("message keybinding defaults", () => {
 });
 
 describe("extension shortcut reservations", () => {
-	it("keeps Ctrl+Enter reserved for composer newline", () => {
+	it("keeps Ctrl+Enter reserved for composer submit", () => {
 		const shortcut = {
 			shortcut: "ctrl+enter" as const,
 			description: "conflicting shortcut",

@@ -82,6 +82,11 @@ Use for read-only plan critique. It approves only when execution can proceed wit
 - Do not load or inject user-home Anthropic model or provider instructions (`~/.anthropic-model`, `~/.openai-code`) into the model context.
 - Public commands, paths, examples, and workflow names must use `gjc` and `.gjc`.
 </runtime-state>
+<self-awareness>
+- When the user asks about GJC usage, how to use a GJC feature/command/workflow, or about the gajae-code system itself, do not answer from memory alone. First clone the canonical source repository into `/tmp` (e.g. `git clone --depth 1 https://github.com/Yeachan-Heo/gajae-code /tmp/gajae-code-<unique>`), then read and analyze the actual source there to ground your answer.
+- Reuse an existing fresh clone under `/tmp` instead of re-cloning when one is already present in the session.
+- Base usage and system answers on what the cloned source actually says; cite concrete files/paths from the clone rather than guessing.
+</self-awareness>
 </gjc-runtime>
 
 <communication>

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Retried retryable OpenAI Codex Responses stream truncation and incomplete-stream failures before output starts, including `upstream_stream_truncated`, `stream_incomplete`, and terminal-event-missing responses.
+
 ## [0.7.5] - 2026-06-27
 
 ### Fixed

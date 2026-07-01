@@ -43,17 +43,29 @@ describe("serializeConversation", () => {
 		expect(result).not.toContain("truncated");
 	});
 
-	it("does not truncate assistant or user messages", () => {
-		const longText = "y".repeat(5000);
+	it("truncates long user, assistant, thinking, and tool-call argument content", () => {
+		const longUserText = "u".repeat(30000);
+		const longAssistantText = "a".repeat(30000);
+		const longThinkingText = "t".repeat(20000);
+		const longArgumentText = "p".repeat(20000);
 		const messages: Message[] = [
 			{
 				role: "user",
-				content: [{ type: "text", text: longText }],
+				content: [{ type: "text", text: longUserText }],
 				timestamp: Date.now(),
 			},
 			{
 				role: "assistant",
-				content: [{ type: "text", text: longText }],
+				content: [
+					{ type: "thinking", thinking: longThinkingText },
+					{ type: "text", text: longAssistantText },
+					{
+						type: "toolCall",
+						id: "tc1",
+						name: "write",
+						arguments: { path: "large.txt", content: longArgumentText },
+					},
+				],
 				api: "anthropic",
 				provider: "anthropic",
 				model: "test",
@@ -72,7 +84,30 @@ describe("serializeConversation", () => {
 
 		const result = serializeConversation(messages);
 
-		expect(result).not.toContain("truncated");
-		expect(result).toContain(longText);
+		expect(result).toContain("[User]:");
+		expect(result).toContain("[Assistant thinking]:");
+		expect(result).toContain("[Assistant]:");
+		expect(result).toContain("[Assistant tool calls]:");
+		expect(result).toContain("more characters truncated");
+		expect(result).not.toContain("u".repeat(13000));
+		expect(result).not.toContain("a".repeat(13000));
+		expect(result).not.toContain("t".repeat(9000));
+		expect(result).not.toContain("p".repeat(5000));
+	});
+
+	it("bounds the total serialized conversation size", () => {
+		const messages: Message[] = Array.from(
+			{ length: 20 },
+			(_, index): Message => ({
+				role: "user",
+				content: [{ type: "text", text: `message-${index}-${"z".repeat(30000)}` }],
+				timestamp: Date.now(),
+			}),
+		);
+
+		const result = serializeConversation(messages);
+
+		expect(result.length).toBeLessThanOrEqual(120000);
+		expect(result).toContain("additional conversation omitted for summarization budget");
 	});
 });

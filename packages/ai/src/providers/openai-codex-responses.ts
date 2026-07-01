@@ -105,7 +105,13 @@ const CODEX_WEBSOCKET_FIRST_EVENT_TIMEOUT_MS = 15000;
 const CODEX_WEBSOCKET_RETRY_BUDGET = CODEX_MAX_RETRIES;
 const CODEX_WEBSOCKET_TRANSPORT_ERROR_PREFIX = "Codex websocket transport error";
 const CODEX_PREVIOUS_RESPONSE_STALE_CODES = new Set(["previous_response_not_found", "codex_previous_response_stale"]);
-const CODEX_RETRYABLE_EVENT_CODES = new Set(["model_error", "server_error", "internal_error"]);
+const CODEX_RETRYABLE_EVENT_CODES = new Set([
+	"model_error",
+	"server_error",
+	"internal_error",
+	"stream_incomplete",
+	"upstream_stream_truncated",
+]);
 const CODEX_NON_RETRYABLE_EVENT_CODES = new Set([
 	"invalid_function_parameters",
 	"invalid_request_error",
@@ -115,7 +121,7 @@ const CODEX_NON_RETRYABLE_EVENT_CODES = new Set([
 const CODEX_NON_RETRYABLE_EVENT_MESSAGE =
 	/invalid[_ -]function[_ -]parameters|invalid schema for function|invalid[_ -]tool[_ -]schema|schema must have type ["']?object["']?/i;
 const CODEX_RETRYABLE_EVENT_MESSAGE =
-	/processing your request|retry your request|temporar(?:y|ily)|overloaded|service.?unavailable|internal error|server error/i;
+	/processing your request|retry your request|temporar(?:y|ily)|overloaded|service.?unavailable|internal error|server error|responses stream ended before a terminal event|stream closed without terminal event|codex stream ended before terminal completion event|upstream[_ -]?stream[_ -]?truncated|stream[_ -]?incomplete/i;
 const CODEX_PROVIDER_SESSION_STATE_KEY = "openai-codex-responses";
 const X_CODEX_TURN_STATE_HEADER = "x-codex-turn-state";
 const X_MODELS_ETAG_HEADER = "x-models-etag";
@@ -936,6 +942,21 @@ async function processCodexResponseStream(
 					firstTokenTime,
 				});
 				if (runtime.sawTerminalEvent) break;
+			}
+			if (!runtime.sawTerminalEvent) {
+				const recovered = await recoverCodexStreamError(
+					context,
+					runtime,
+					new CodexProviderStreamError(
+						"Codex stream ended before terminal completion event",
+						true,
+						"stream_incomplete",
+					),
+				);
+				if (recovered) {
+					context.firstTokenTime = undefined;
+					continue;
+				}
 			}
 			return { firstTokenTime };
 		} catch (error) {

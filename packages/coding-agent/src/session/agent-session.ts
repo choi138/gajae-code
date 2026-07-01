@@ -8292,7 +8292,7 @@ export class AgentSession {
 		// terminated, retry delay exceeded
 		return (
 			isUnexpectedSocketCloseMessage(errorMessage) ||
-			/overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|retry your request|network.?error|connection.?error|connection.?refused|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|timed? out|timeout|terminated|retry delay|stream stall|no error details in response/i.test(
+			/overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|retry your request|network.?error|connection.?error|connection.?refused|other side closed|fetch failed|upstream.?connect|upstream[_ -]?stream[_ -]?truncated|reset before headers|socket hang up|timed? out|timeout|terminated|retry delay|stream stall|stream[_ -]?incomplete|stream closed without terminal event|responses stream ended before a terminal event|codex stream ended before terminal completion event|no error details in response/i.test(
 				errorMessage,
 			)
 		);

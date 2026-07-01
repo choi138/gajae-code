@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Bounded compaction conversation serialization across user text, assistant text, thinking, tool-call arguments, and the total serialized payload so overflow recovery cannot recursively exceed the model context window while preparing a summary.
+
 ## [0.7.7] - 2026-06-28
 
 ### Fixed

@@ -208,6 +208,26 @@ describe("AgentSession resilient retry", () => {
 		expect(waitSpy).toHaveBeenCalled();
 	});
 
+	it("retries Codex stream truncation errors", async () => {
+		session = buildSession({
+			responses: [
+				{ throw: "upstream_stream_truncated: Responses stream ended before a terminal event" },
+				{ content: ["recovered after truncated stream"] },
+			],
+		});
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const { retryStartEvents, retryEndEvents } = track(session);
+
+		await session.prompt("trigger codex truncated stream");
+		await session.waitForIdle();
+
+		expect(retryStartEvents).toHaveLength(1);
+		expect(retryStartEvents[0].unbounded).toBe(true);
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ success: true });
+		expect(lastAssistant(session).stopReason).toBe("stop");
+	});
+
 	it("retries unknown / no-code errors", async () => {
 		session = buildSession({
 			responses: [{ throw: "weird unclassified glitch zzz" }, { content: ["recovered"] }],

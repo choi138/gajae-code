@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Classified Codex stream truncation and incomplete-stream errors as transient so context-overflow compaction can retry interrupted summary attempts instead of failing immediately.
+
 ## [0.7.8] - 2026-06-30
 ### Added
 

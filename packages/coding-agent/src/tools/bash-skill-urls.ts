@@ -3,7 +3,7 @@ import * as path from "node:path";
 import type { Skill } from "../extensibility/skills";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import { validateRelativePath } from "../internal-urls/skill-protocol";
-import type { InternalResource } from "../internal-urls/types";
+import type { InternalResource, ResolveContext } from "../internal-urls/types";
 import { normalizeLocalScheme } from "./path-utils";
 import { ToolError } from "./tool-errors";
 
@@ -19,15 +19,31 @@ type SupportedInternalScheme = (typeof SUPPORTED_INTERNAL_SCHEMES)[number];
 
 interface InternalUrlResolver {
 	canHandle(input: string): boolean;
-	resolve(input: string): Promise<InternalResource>;
+	resolve(input: string, context?: ResolveContext): Promise<InternalResource>;
 }
 
 export interface InternalUrlExpansionOptions {
 	skills: readonly Skill[];
 	noEscape?: boolean;
 	internalRouter?: InternalUrlResolver;
+	resolveContext?: ResolveContext;
 	localOptions?: LocalProtocolOptions;
 	ensureLocalParentDirs?: boolean;
+}
+
+interface TextRange {
+	start: number;
+	end: number;
+}
+
+interface HeredocDelimiter {
+	text: string;
+	stripLeadingTabs: boolean;
+}
+
+interface ParsedHeredocWord {
+	delimiter: string;
+	end: number;
 }
 
 /**
@@ -140,6 +156,206 @@ function unquoteToken(token: string): string {
 	return token;
 }
 
+function readLineRange(text: string, start: number): { start: number; contentEnd: number; end: number } {
+	const newlineIndex = text.indexOf("\n", start);
+	const end = newlineIndex === -1 ? text.length : newlineIndex + 1;
+	const contentEnd =
+		newlineIndex === -1 ? text.length : text.charCodeAt(newlineIndex - 1) === 13 ? newlineIndex - 1 : newlineIndex;
+	return { start, contentEnd, end };
+}
+
+function isShellWhitespace(ch: string): boolean {
+	return ch === " " || ch === "\t";
+}
+
+function isHeredocWordTerminator(ch: string): boolean {
+	return (
+		isShellWhitespace(ch) ||
+		ch === ";" ||
+		ch === "&" ||
+		ch === "|" ||
+		ch === "<" ||
+		ch === ">" ||
+		ch === "(" ||
+		ch === ")"
+	);
+}
+
+function parseHeredocWord(command: string, start: number, end: number): ParsedHeredocWord | undefined {
+	let i = start;
+	let delimiter = "";
+
+	while (i < end) {
+		const ch = command[i];
+		if (isHeredocWordTerminator(ch)) break;
+
+		if (ch === "'") {
+			i++;
+			while (i < end) {
+				const quoted = command[i];
+				if (quoted === "'") {
+					i++;
+					break;
+				}
+				delimiter += quoted;
+				i++;
+			}
+			continue;
+		}
+
+		if (ch === '"') {
+			i++;
+			while (i < end) {
+				const quoted = command[i];
+				if (quoted === '"') {
+					i++;
+					break;
+				}
+				if (quoted === "\\" && i + 1 < end) {
+					delimiter += command[i + 1];
+					i += 2;
+					continue;
+				}
+				delimiter += quoted;
+				i++;
+			}
+			continue;
+		}
+
+		if (ch === "\\" && i + 1 < end) {
+			delimiter += command[i + 1];
+			i += 2;
+			continue;
+		}
+
+		delimiter += ch;
+		i++;
+	}
+
+	if (!delimiter) return undefined;
+	return { delimiter, end: i };
+}
+
+function collectHeredocsFromShellLine(
+	command: string,
+	start: number,
+	end: number,
+): {
+	delimiters: HeredocDelimiter[];
+	ignoredRanges: TextRange[];
+} {
+	const delimiters: HeredocDelimiter[] = [];
+	const ignoredRanges: TextRange[] = [];
+	let singleQuoted = false;
+	let doubleQuoted = false;
+	let escaped = false;
+
+	for (let i = start; i < end; i++) {
+		const ch = command[i];
+
+		if (escaped) {
+			escaped = false;
+			continue;
+		}
+
+		if (!singleQuoted && ch === "\\") {
+			escaped = true;
+			continue;
+		}
+
+		if (!doubleQuoted && ch === "'") {
+			singleQuoted = !singleQuoted;
+			continue;
+		}
+
+		if (!singleQuoted && ch === '"') {
+			doubleQuoted = !doubleQuoted;
+			continue;
+		}
+
+		if (singleQuoted || doubleQuoted) continue;
+
+		if (ch === "#" && (i === start || isShellWhitespace(command[i - 1]))) break;
+
+		if (ch !== "<" || command[i + 1] !== "<" || command[i + 2] === "<") continue;
+
+		let cursor = i + 2;
+		const stripLeadingTabs = command[cursor] === "-";
+		if (stripLeadingTabs) cursor++;
+		while (cursor < end && isShellWhitespace(command[cursor])) cursor++;
+
+		const parsed = parseHeredocWord(command, cursor, end);
+		if (!parsed) continue;
+
+		ignoredRanges.push({ start: cursor, end: parsed.end });
+		delimiters.push({ text: parsed.delimiter, stripLeadingTabs });
+		i = parsed.end - 1;
+	}
+
+	return { delimiters, ignoredRanges };
+}
+
+function heredocDelimiterMatches(
+	command: string,
+	lineStart: number,
+	contentEnd: number,
+	delimiter: HeredocDelimiter,
+): boolean {
+	let start = lineStart;
+	if (delimiter.stripLeadingTabs) {
+		while (start < contentEnd && command[start] === "\t") start++;
+	}
+	return command.slice(start, contentEnd) === delimiter.text;
+}
+
+function collectHeredocIgnoredRanges(command: string): TextRange[] {
+	if (!command.includes("<<")) return [];
+
+	const ranges: TextRange[] = [];
+	const pendingDelimiters: HeredocDelimiter[] = [];
+	let offset = 0;
+
+	while (offset < command.length) {
+		while (pendingDelimiters.length > 0 && offset < command.length) {
+			const delimiter = pendingDelimiters.shift();
+			if (!delimiter) break;
+
+			const bodyStart = offset;
+			let foundDelimiter = false;
+			while (offset < command.length) {
+				const line = readLineRange(command, offset);
+				offset = line.end;
+				if (heredocDelimiterMatches(command, line.start, line.contentEnd, delimiter)) {
+					ranges.push({ start: bodyStart, end: line.end });
+					foundDelimiter = true;
+					break;
+				}
+			}
+			if (!foundDelimiter) {
+				ranges.push({ start: bodyStart, end: command.length });
+			}
+		}
+
+		if (offset >= command.length) break;
+
+		const line = readLineRange(command, offset);
+		const { delimiters, ignoredRanges } = collectHeredocsFromShellLine(command, line.start, line.contentEnd);
+		ranges.push(...ignoredRanges);
+		pendingDelimiters.push(...delimiters);
+		offset = line.end;
+	}
+
+	return ranges;
+}
+
+function overlapsRange(start: number, end: number, ranges: readonly TextRange[]): boolean {
+	for (const range of ranges) {
+		if (end <= range.start) return false;
+		if (start < range.end && end > range.start) return true;
+	}
+	return false;
+}
+
 /** Shell-escape a path using single quotes. */
 function shellEscape(p: string): string {
 	return `'${p.replace(/'/g, "'\\''")}'`;
@@ -149,6 +365,7 @@ async function resolveInternalUrlToPath(
 	rawUrl: string,
 	skills: readonly Skill[],
 	internalRouter?: InternalUrlResolver,
+	resolveContext?: ResolveContext,
 	localOptions?: LocalProtocolOptions,
 	ensureLocalParentDirs?: boolean,
 ): Promise<string> {
@@ -184,7 +401,7 @@ async function resolveInternalUrlToPath(
 
 	let resource: InternalResource;
 	try {
-		resource = await internalRouter.resolve(url);
+		resource = await internalRouter.resolve(url, resolveContext);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		throw new ToolError(`Failed to resolve ${scheme}:// URL in bash command: ${url}\n${message}`);
@@ -207,7 +424,9 @@ export function expandSkillUrls(command: string, skills: readonly Skill[]): stri
 		return command;
 	}
 
-	return command.replace(SKILL_URL_PATTERN, token => {
+	const ignoredRanges = collectHeredocIgnoredRanges(command);
+	return command.replace(SKILL_URL_PATTERN, (token, index: number) => {
+		if (overlapsRange(index, index + token.length, ignoredRanges)) return token;
 		const url = unquoteToken(token);
 		const resolvedPath = resolveSkillUrlToPath(url, skills);
 		return shellEscape(resolvedPath);
@@ -221,7 +440,12 @@ export function expandSkillUrls(command: string, skills: readonly Skill[]): stri
 export async function expandInternalUrls(command: string, options: InternalUrlExpansionOptions): Promise<string> {
 	if (!command.includes("://") && !command.includes("local:/")) return command;
 
-	const matches = Array.from(command.matchAll(INTERNAL_URL_PATTERN_INCLUDING_NORMALIZED_LOCAL));
+	const ignoredRanges = collectHeredocIgnoredRanges(command);
+	const matches = Array.from(command.matchAll(INTERNAL_URL_PATTERN_INCLUDING_NORMALIZED_LOCAL)).filter(match => {
+		const index = match.index;
+		if (index === undefined) return false;
+		return !overlapsRange(index, index + match[0].length, ignoredRanges);
+	});
 	if (matches.length === 0) return command;
 
 	let expanded = command;
@@ -237,6 +461,7 @@ export async function expandInternalUrls(command: string, options: InternalUrlEx
 			url,
 			options.skills,
 			options.internalRouter,
+			options.resolveContext,
 			options.localOptions,
 			options.ensureLocalParentDirs,
 		);

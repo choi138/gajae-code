@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import type { Skill } from "../../src/extensibility/skills";
 import { resolveLocalUrlToPath } from "../../src/internal-urls";
+import type { InternalResource, ResolveContext } from "../../src/internal-urls/types";
 import { expandInternalUrls, expandSkillUrls } from "../../src/tools/bash-skill-urls";
 import { ToolError } from "../../src/tools/tool-errors";
 
@@ -20,15 +21,17 @@ function createSkill(name: string, baseDir: string): Skill {
 	};
 }
 
-function createInternalRouter(resources: Record<string, { sourcePath?: string; error?: string }>): {
+function createInternalRouter(
+	resources: Record<string, { sourcePath?: string; error?: string }>,
+	onResolve?: (input: string, context: ResolveContext | undefined) => void,
+): {
 	canHandle: (input: string) => boolean;
-	resolve: (
-		input: string,
-	) => Promise<{ url: string; content: string; contentType: "text/plain"; sourcePath?: string; immutable: boolean }>;
+	resolve: (input: string, context?: ResolveContext) => Promise<InternalResource>;
 } {
 	return {
 		canHandle: input => /^(agent|artifact|plan|memory|rule):\/\//.test(input),
-		resolve: async input => {
+		resolve: async (input, context) => {
+			onResolve?.(input, context);
 			const entry = resources[input];
 			if (!entry) {
 				throw new Error(`No mapping for ${input}`);
@@ -185,6 +188,56 @@ describe("expandInternalUrls", () => {
 		await expect(expandInternalUrls("echo agent://abc", { skills: [], internalRouter: router })).resolves.toBe(
 			`echo ${shellEscape("/tmp/session/abc.md")}`,
 		);
+	});
+
+	it("passes resolve context to the internal router for non-skill URLs", async () => {
+		const contexts: (ResolveContext | undefined)[] = [];
+		const resolveContext: ResolveContext = {
+			cwd: "/tmp/workspace",
+			getArtifactsDir: () => "/tmp/session-artifacts",
+			settings: { mode: "test" },
+			signal: new AbortController().signal,
+		};
+		const router = createInternalRouter(
+			{
+				"agent://abc": { sourcePath: "/tmp/session/abc.md" },
+			},
+			(_input, context) => contexts.push(context),
+		);
+
+		await expect(
+			expandInternalUrls("cat agent://abc", { skills: [], internalRouter: router, resolveContext }),
+		).resolves.toBe(`cat ${shellEscape("/tmp/session/abc.md")}`);
+		expect(contexts).toHaveLength(1);
+		expect(contexts[0]).toBe(resolveContext);
+	});
+
+	it("does not expand internal URLs inside single-quoted heredoc bodies", async () => {
+		const router = createInternalRouter({
+			"agent://outside": { sourcePath: "/tmp/session/outside.md" },
+		});
+		const command = "cat agent://outside <<'NODE'\nconst evidence = 'agent://inside';\nNODE\n";
+
+		await expect(expandInternalUrls(command, { skills: [], internalRouter: router })).resolves.toBe(
+			`cat ${shellEscape("/tmp/session/outside.md")} <<'NODE'\nconst evidence = 'agent://inside';\nNODE\n`,
+		);
+	});
+
+	it("does not expand internal URLs inside tab-stripped heredoc bodies", async () => {
+		const router = createInternalRouter({
+			"artifact://outside": { sourcePath: "/tmp/artifacts/outside.log" },
+		});
+		const command = "node <<-EOF\n\tconst evidence = 'artifact://inside';\n\tEOF\ncat artifact://outside\n";
+
+		await expect(expandInternalUrls(command, { skills: [], internalRouter: router })).resolves.toBe(
+			`node <<-EOF\n\tconst evidence = 'artifact://inside';\n\tEOF\ncat ${shellEscape("/tmp/artifacts/outside.log")}\n`,
+		);
+	});
+
+	it("does not expand URLs used as heredoc delimiter words", async () => {
+		const command = "cat <<agent://delimiter\nbody\nagent://delimiter\n";
+
+		await expect(expandInternalUrls(command, { skills: [] })).resolves.toBe(command);
 	});
 
 	it("expands local:// URLs to filesystem paths without requiring preexisting files", async () => {
